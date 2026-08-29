@@ -1,4 +1,8 @@
 //! Port of `vcf.XRefGT`: phased genotypes in haplotype-major bit-packed form.
+//!
+//! Unlike the Java class, the combined (target + reference) view keeps the
+//! reference haplotypes behind an `Arc` so each phasing iteration reuses the
+//! same reference bit arrays instead of cloning them.
 
 use crate::bits::BitArray;
 use crate::phasedata::HapLayout;
@@ -8,7 +12,8 @@ use std::sync::Arc;
 
 pub struct XRefGT {
     pub layout: Arc<HapLayout>,
-    pub haps: Vec<BitArray>,
+    own: Vec<BitArray>,
+    shared: Option<Arc<XRefGT>>, // haplotypes appended after `own`
 }
 
 impl XRefGT {
@@ -40,7 +45,11 @@ impl XRefGT {
                 bits
             })
             .collect();
-        XRefGT { layout, haps }
+        XRefGT {
+            layout,
+            own: haps,
+            shared: None,
+        }
     }
 
     /// Builds an XRefGT for the target haplotypes from per-sample phase data.
@@ -60,23 +69,36 @@ impl XRefGT {
                 }
             })
             .collect();
-        XRefGT { layout, haps }
+        XRefGT {
+            layout,
+            own: haps,
+            shared: None,
+        }
     }
 
     /// `XRefGT.combine(first, second)`: haplotypes of `first` then `second`.
-    pub fn combine(first: &XRefGT, second: &XRefGT) -> XRefGT {
-        let mut haps = Vec::with_capacity(first.haps.len() + second.haps.len());
-        haps.extend(first.haps.iter().cloned());
-        haps.extend(second.haps.iter().cloned());
+    /// The second (reference) haplotypes are shared, not copied.
+    pub fn combine(first: XRefGT, second: &Arc<XRefGT>) -> XRefGT {
+        debug_assert!(first.shared.is_none() && second.shared.is_none());
         XRefGT {
-            layout: first.layout.clone(),
-            haps,
+            layout: first.layout,
+            own: first.own,
+            shared: Some(second.clone()),
+        }
+    }
+
+    #[inline]
+    fn hap(&self, hap: usize) -> &BitArray {
+        if hap < self.own.len() {
+            &self.own[hap]
+        } else {
+            &self.shared.as_ref().unwrap().own[hap - self.own.len()]
         }
     }
 
     #[inline]
     pub fn n_haps(&self) -> usize {
-        self.haps.len()
+        self.own.len() + self.shared.as_ref().map_or(0, |s| s.own.len())
     }
 
     #[inline]
@@ -86,7 +108,7 @@ impl XRefGT {
 
     #[inline]
     pub fn allele(&self, m: usize, hap: usize) -> i32 {
-        self.layout.allele(&self.haps[hap], m)
+        self.layout.allele(self.hap(hap), m)
     }
 
     /// `XRefGT.hash(hap, start, end)`
@@ -94,7 +116,7 @@ impl XRefGT {
     pub fn hash(&self, hap: usize, start: usize, end: usize) -> i32 {
         let start_bit = self.layout.sum_hap_bits[start] as usize;
         let end_bit = self.layout.sum_hap_bits[end] as usize;
-        self.haps[hap].hash(start_bit, end_bit)
+        self.hap(hap).hash(start_bit, end_bit)
     }
 
     /// `XRefGT.copyTo(hap, start, end, bitList)`
@@ -102,7 +124,7 @@ impl XRefGT {
     pub fn copy_to(&self, hap: usize, start: usize, end: usize, dst: &mut BitArray) {
         let start_bit = self.layout.sum_hap_bits[start] as usize;
         let end_bit = self.layout.sum_hap_bits[end] as usize;
-        dst.copy_from(&self.haps[hap], start_bit, end_bit);
+        dst.copy_from(self.hap(hap), start_bit, end_bit);
     }
 }
 

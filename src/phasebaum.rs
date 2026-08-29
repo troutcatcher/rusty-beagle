@@ -914,9 +914,13 @@ impl<'a> HmmParamData<'a> {
 
 /// Port of `PhaseLS.runStage1`.
 pub fn run_stage1(pd: &mut PhaseData, par: &Par) {
+    let timing2 = std::env::var("RUSTY_BEAGLE_TIMING2").is_ok();
+    let t0 = std::time::Instant::now();
     let use_bwd = pd.it & 1 == 0;
     let coded_steps = CodedSteps::new(&pd.est_phase, par.nthreads);
+    let t1 = std::time::Instant::now();
     let phase_ibs = PbwtPhaseIbs::new(pd, par, &coded_steps, use_bwd);
+    let t2 = std::time::Instant::now();
     let all_haps = coded_steps.all_haps.clone();
     if par.em {
         let mut rand = JavaRandom::new(pd.it_seed());
@@ -926,6 +930,7 @@ pub fn run_stage1(pd: &mut PhaseData, par: &Par) {
             update_parameters(pd, par, &phase_ibs, &all_haps, &mut rand);
         }
     }
+    let t3 = std::time::Instant::now();
     // phase every sample (work-stealing across threads; per-sample results
     // are order-independent because each sample's phase is stored separately)
     let n_samples = pd.fpd().n_targ_samples;
@@ -949,6 +954,16 @@ pub fn run_stage1(pd: &mut PhaseData, par: &Par) {
             });
         }
     });
+    if timing2 {
+        eprintln!(
+            "[timing2] it {}: coded {:.3}s  ibs {:.3}s  em {:.3}s  baum {:.3}s",
+            pd.it,
+            (t1 - t0).as_secs_f64(),
+            (t2 - t1).as_secs_f64(),
+            (t3 - t2).as_secs_f64(),
+            t3.elapsed().as_secs_f64()
+        );
+    }
 }
 
 fn initialize_parameters(

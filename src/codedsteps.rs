@@ -19,7 +19,7 @@ impl CodedSteps {
         let fpd = &est_phase.fpd;
         let targ_haps = XRefGT::from_est_phase(est_phase);
         let all_haps = match &fpd.stage1_xref {
-            Some(ref_haps) => Arc::new(XRefGT::combine(&targ_haps, ref_haps)),
+            Some(ref_haps) => Arc::new(XRefGT::combine(targ_haps, ref_haps)),
             None => Arc::new(targ_haps),
         };
         let steps = &fpd.stage1_steps;

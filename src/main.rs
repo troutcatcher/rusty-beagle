@@ -170,16 +170,31 @@ fn run(par: &Par, log: &mut Log) {
                 fpd.targ.clone()
             } else {
                 let mut pd = phasedata::PhaseData::new(fpd.clone(), par, seed);
+                if timing {
+                    eprintln!(
+                        "[timing] fpd+initphase: {:.3}s",
+                        t0.elapsed().as_secs_f64()
+                    );
+                }
                 let n_its = (par.burnin + par.iterations) as usize;
                 let max_burnin_swap_rate = 0.01f64;
                 while pd.it < n_its {
+                    let t_it = Instant::now();
                     phasebaum::run_stage1(&mut pd, par);
+                    if timing {
+                        eprintln!(
+                            "[timing] stage1 it {}: {:.3}s",
+                            pd.it,
+                            t_it.elapsed().as_secs_f64()
+                        );
+                    }
                     pd.increment_it(par);
                     let swap_rate = phasedata::swap_rate_get_and_reset();
                     if pd.it < par.burnin as usize && swap_rate <= max_burnin_swap_rate {
                         pd.advance_to_first_phasing_it(par);
                     }
                 }
+                let t_s2 = Instant::now();
                 let result = if fpd.n_stage1_markers() == fpd.targ.len() {
                     stage2::stage1_marker_alleles(&pd)
                 } else {
@@ -188,6 +203,9 @@ fn run(par: &Par, log: &mut Log) {
                         .map(|m| s2.alleles_at(&fpd, &|m1| stage1_alleles[m1].clone(), m))
                         .collect()
                 };
+                if timing {
+                    eprintln!("[timing] stage2: {:.3}s", t_s2.elapsed().as_secs_f64());
+                }
                 log.println(&format!(
                     "Phasing time     : {:.2} seconds",
                     t0.elapsed().as_secs_f64()
