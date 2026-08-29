@@ -43,6 +43,12 @@ struct RefHapHash<'a> {
     /// allele) for haplotype `i`
     alt_start: Vec<u32>,
     alt_data: Vec<(u32, u32)>,
+    /// reference haplotype -> its index in `i2hap`; every state of every
+    /// target haplotype is looked up here, which made a binary search over
+    /// `i2hap` (a dozen scattered probes) the cost of the accumulation loop.
+    /// Borrowed per thread and never cleared between clusters: only the
+    /// entries this cluster just wrote are ever read back.
+    hap_to_index: &'a mut Vec<u32>,
     start: usize,
     end: usize,
 }
@@ -52,14 +58,16 @@ impl<'a> RefHapHash<'a> {
         state_probs: &[StateProbs],
         targ_cluster: usize,
         ref_recs: &'a [Arc<RefRec>],
+        n_ref_haps: usize,
+        hap_to_index: &'a mut Vec<u32>,
         start: usize,
         end: usize,
     ) -> RefHapHash<'a> {
         assert!(start < end);
         let mut list: Vec<i32> = Vec::with_capacity(10 * state_probs.len());
         for sp in state_probs {
-            for k in 0..sp.n_states(targ_cluster) {
-                list.push(sp.ref_hap(targ_cluster, k));
+            for st in sp.states(targ_cluster) {
+                list.push(st.hap);
             }
         }
         list.sort_unstable();
@@ -67,11 +75,18 @@ impl<'a> RefHapHash<'a> {
         let i2hap = list;
         let n = i2hap.len();
         let _ = targ_cluster;
+        if hap_to_index.len() < n_ref_haps {
+            hap_to_index.resize(n_ref_haps, 0);
+        }
+        for (i, &h) in i2hap.iter().enumerate() {
+            hap_to_index[h as usize] = i as u32;
+        }
         let mut hash = RefHapHash {
             ref_recs,
             i2hash: vec![0; n],
             alt_start: Vec::new(),
             alt_data: Vec::new(),
+            hap_to_index,
             i2hap,
             start,
             end,
@@ -186,7 +201,7 @@ impl<'a> RefHapHash<'a> {
 
     #[inline]
     fn hap2index(&self, hap: i32) -> usize {
-        self.i2hap.binary_search(&hap).expect("state hap in hash")
+        self.hap_to_index[hap as usize] as usize
     }
 
     #[inline]
@@ -484,6 +499,7 @@ fn append_records(
     targ_cluster: usize,
     fmt: &Fmt,
     hom_ref: &[String],
+    hap_to_index: &mut Vec<u32>,
 ) -> String {
     // bounds from the ImputedVcfWriter constructor
     let ref_start = if targ_cluster == 0 {
@@ -506,7 +522,15 @@ fn append_records(
     }
     let ref_recs = &window.ref_recs;
     let tq0 = std::time::Instant::now();
-    let rhh = RefHapHash::new(state_probs, targ_cluster, ref_recs, ref_start, ref_end);
+    let rhh = RefHapHash::new(
+        state_probs,
+        targ_cluster,
+        ref_recs,
+        imp_data.n_ref_haps,
+        hap_to_index,
+        ref_start,
+        ref_end,
+    );
     out_add(2, tq0.elapsed().as_nanos() as u64);
     let n_markers = ref_end - ref_start;
     let mut rec_builders: Vec<ImputedRecBuilder> = (ref_start..ref_end)
@@ -521,10 +545,18 @@ fn append_records(
             )
         })
         .collect();
-    let mut a1_probs: Vec<Vec<f32>> = (ref_start..ref_end)
-        .map(|m| vec![0.0f32; ref_recs[m].marker.n_alleles as usize])
-        .collect();
-    let mut a2_probs: Vec<Vec<f32>> = a1_probs.clone();
+    // allele probabilities for the two haplotypes of the current sample,
+    // flat with per-marker offsets: a `Vec` per marker meant an allocation
+    // per marker per cluster, and a pointer chase in the accumulation loop
+    let mut al_off: Vec<u32> = Vec::with_capacity(n_markers + 1);
+    let mut total = 0u32;
+    for m in ref_start..ref_end {
+        al_off.push(total);
+        total += ref_recs[m].marker.n_alleles as u32;
+    }
+    al_off.push(total);
+    let mut a1_probs: Vec<f32> = vec![0.0; total as usize];
+    let mut a2_probs: Vec<f32> = vec![0.0; total as usize];
     let is_imputed: Vec<bool> = (ref_start..ref_end)
         .map(|m| window.indices.marker_to_targ_marker[m] == -1)
         .collect();
@@ -544,6 +576,7 @@ fn append_records(
             clust_end,
             ref_end,
             &mut a1_probs,
+            &al_off,
             &mut scratch,
         );
         set_al_probs(
@@ -555,6 +588,7 @@ fn append_records(
             clust_end,
             ref_end,
             &mut a2_probs,
+            &al_off,
             &mut scratch,
         );
         out_add(3, tp0.elapsed().as_nanos() as u64);
@@ -562,21 +596,26 @@ fn append_records(
         if is_diploid {
             for m in 0..n_markers {
                 if !is_imputed[m] {
-                    set_to_obs_alleles(imp_data, window, ref_start, m, h, &mut a1_probs, &mut a2_probs);
+                    set_to_obs_alleles(
+                        imp_data, window, ref_start, m, h, &mut a1_probs, &mut a2_probs, &al_off,
+                    );
                 }
-                let (a1, a2) = (&mut a1_probs[m], &mut a2_probs[m]);
-                rec_builders[m].add_sample_data2(a1, a2);
-                a1.fill(0.0);
-                a2.fill(0.0);
+                let (lo, hi) = (al_off[m] as usize, al_off[m + 1] as usize);
+                rec_builders[m].add_sample_data2(&mut a1_probs[lo..hi], &mut a2_probs[lo..hi]);
+                a1_probs[lo..hi].fill(0.0);
+                a2_probs[lo..hi].fill(0.0);
             }
         } else {
             for m in 0..n_markers {
                 if !is_imputed[m] {
-                    set_to_obs_alleles(imp_data, window, ref_start, m, h, &mut a1_probs, &mut a2_probs);
+                    set_to_obs_alleles(
+                        imp_data, window, ref_start, m, h, &mut a1_probs, &mut a2_probs, &al_off,
+                    );
                 }
-                rec_builders[m].add_sample_data1(&mut a1_probs[m]);
-                a1_probs[m].fill(0.0);
-                a2_probs[m].fill(0.0);
+                let (lo, hi) = (al_off[m] as usize, al_off[m + 1] as usize);
+                rec_builders[m].add_sample_data1(&mut a1_probs[lo..hi]);
+                a1_probs[lo..hi].fill(0.0);
+                a2_probs[lo..hi].fill(0.0);
             }
         }
         out_add(4, tb0.elapsed().as_nanos() as u64);
@@ -618,18 +657,17 @@ fn set_al_probs(
     ref_start: usize,
     clust_end: usize,
     ref_end: usize,
-    al_probs: &mut [Vec<f32>],
+    al_probs: &mut [f32],
+    al_off: &[u32],
     scratch: &mut SetAlProbsScratch,
 ) {
     scratch.indices.clear();
     scratch.hashes.clear();
     scratch.seq_probs.clear();
     scratch.seq_probs_p1.clear();
-    for j in 0..state_probs.n_states(targ_cluster) {
-        let hap = state_probs.ref_hap(targ_cluster, j);
-        let val = state_probs.probs(targ_cluster, j);
-        let val_p1 = state_probs.probs_p1(targ_cluster, j);
-        let index = rhh.hap2index(hap);
+    for st in state_probs.states(targ_cluster) {
+        let (val, val_p1) = (st.prob, st.prob_p1);
+        let index = rhh.hap2index(st.hap);
         let hash = rhh.hash(index);
         let mut i = 0;
         while i < scratch.hashes.len() && scratch.hashes[i] != hash {
@@ -651,7 +689,7 @@ fn set_al_probs(
         rhh.set_alleles(index, &mut scratch.alleles);
         for m in ref_start..ref_end {
             let mm = m - ref_start;
-            al_probs[mm][scratch.alleles[mm] as usize] = 1.0;
+            al_probs[al_off[mm] as usize + scratch.alleles[mm] as usize] = 1.0;
         }
     } else {
         for j in 0..n_seq {
@@ -661,13 +699,13 @@ fn set_al_probs(
             let prob_p1 = scratch.seq_probs_p1[j];
             for m in ref_start..clust_end {
                 let mm = m - ref_start;
-                al_probs[mm][scratch.alleles[mm] as usize] += prob;
+                al_probs[al_off[mm] as usize + scratch.alleles[mm] as usize] += prob;
             }
             for m in clust_end..ref_end {
                 // Java: float += double  =>  add in f64, then narrow to f32
                 let wt = imp_data.weight[m] as f64;
                 let mm = m - ref_start;
-                let slot = &mut al_probs[mm][scratch.alleles[mm] as usize];
+                let slot = &mut al_probs[al_off[mm] as usize + scratch.alleles[mm] as usize];
                 *slot = (*slot as f64 + (wt * prob as f64 + (1.0 - wt) * prob_p1 as f64)) as f32;
             }
         }
@@ -681,16 +719,18 @@ fn set_to_obs_alleles(
     ref_start: usize,
     m: usize,
     targ_hap: usize,
-    a1_probs: &mut [Vec<f32>],
-    a2_probs: &mut [Vec<f32>],
+    a1_probs: &mut [f32],
+    a2_probs: &mut [f32],
+    al_off: &[u32],
 ) {
-    a1_probs[m].fill(0.0);
-    a2_probs[m].fill(0.0);
+    let (lo, hi) = (al_off[m] as usize, al_off[m + 1] as usize);
+    a1_probs[lo..hi].fill(0.0);
+    a2_probs[lo..hi].fill(0.0);
     let t = window.indices.marker_to_targ_marker[ref_start + m] as usize;
     let a1 = imp_data.targ_alleles[t][targ_hap] as usize;
     let a2 = imp_data.targ_alleles[t][targ_hap + 1] as usize;
-    a1_probs[m][a1] = 1.0;
-    a2_probs[m][a2] = 1.0;
+    a1_probs[lo + a1] = 1.0;
+    a2_probs[lo + a2] = 1.0;
 }
 
 /// Port of `main.WindowWriter`.
@@ -737,7 +777,7 @@ impl WindowWriter {
     ) {
         let chunks: Vec<Vec<u8>> = (0..imp_data.n_clusters)
             .into_par_iter()
-            .map(|c| {
+            .map_init(Vec::<u32>::new, |hap_to_index, c| {
                 let t0 = std::time::Instant::now();
                 let text = append_records(
                     imp_data,
@@ -749,6 +789,7 @@ impl WindowWriter {
                     c,
                     &self.fmt,
                     &self.hom_ref,
+                    hap_to_index,
                 );
                 let t1 = std::time::Instant::now();
                 let out = if text.is_empty() {

@@ -6,34 +6,35 @@ use crate::impibs::ImpIbs;
 use crate::impstates::ImpStates;
 use rayon::prelude::*;
 
+/// One retained HMM state: its reference haplotype and its probability at
+/// the cluster and at the next cluster (the pair interpolation needs).
+#[derive(Clone, Copy)]
+pub struct StateProb {
+    pub hap: i32,
+    pub prob: f32,
+    pub prob_p1: f32,
+}
+
 /// Sparse per-cluster HMM state probabilities for one target haplotype
 /// (CSR layout; port of `imp.StateProbs`).
+///
+/// The three values are interleaved rather than held in parallel arrays:
+/// they are written together when sparsifying and read together when
+/// building output records, so one stream costs a third of the cache misses
+/// and a third of the allocations -- and these rows are retained for every
+/// target haplotype at once.
 pub struct StateProbs {
     offsets: Vec<u32>, // n_clusters + 1
-    haps: Vec<i32>,
-    probs: Vec<f32>,
-    probs_p1: Vec<f32>,
+    data: Vec<StateProb>,
 }
 
 impl StateProbs {
+    /// The retained states of `marker`.
     #[inline]
-    pub fn n_states(&self, marker: usize) -> usize {
-        (self.offsets[marker + 1] - self.offsets[marker]) as usize
-    }
-
-    #[inline]
-    pub fn ref_hap(&self, marker: usize, index: usize) -> i32 {
-        self.haps[self.offsets[marker] as usize + index]
-    }
-
-    #[inline]
-    pub fn probs(&self, marker: usize, index: usize) -> f32 {
-        self.probs[self.offsets[marker] as usize + index]
-    }
-
-    #[inline]
-    pub fn probs_p1(&self, marker: usize, index: usize) -> f32 {
-        self.probs_p1[self.offsets[marker] as usize + index]
+    pub fn states(&self, marker: usize) -> &[StateProb] {
+        let lo = self.offsets[marker] as usize;
+        let hi = self.offsets[marker + 1] as usize;
+        &self.data[lo..hi]
     }
 }
 
@@ -52,9 +53,7 @@ struct Baum {
     size_hint: usize,
     /// one cluster's worth of retained states, so the filter writes into a
     /// small L1-resident buffer and each cluster appends in one memcpy
-    scr_haps: Vec<i32>,
-    scr_probs: Vec<f32>,
-    scr_probs_p1: Vec<f32>,
+    scratch: Vec<StateProb>,
 }
 
 impl Baum {
@@ -71,9 +70,14 @@ impl Baum {
             bwd_val: vec![0.0; max_states],
             max_states,
             size_hint: 0,
-            scr_haps: vec![0; max_states],
-            scr_probs: vec![0.0; max_states],
-            scr_probs_p1: vec![0.0; max_states],
+            scratch: vec![
+                StateProb {
+                    hap: 0,
+                    prob: 0.0,
+                    prob_p1: 0.0
+                };
+                max_states
+            ],
         }
     }
 
@@ -202,16 +206,11 @@ impl Baum {
         let n_markers_m1 = n_markers - 1;
         let threshold = (0.005f32).min(0.9999f32 / n_states as f32);
         let mut offsets: Vec<u32> = Vec::with_capacity(n_markers + 1);
-        let cap = self.size_hint;
-        let mut haps: Vec<i32> = Vec::with_capacity(cap);
-        let mut probs: Vec<f32> = Vec::with_capacity(cap);
-        let mut probs_p1: Vec<f32> = Vec::with_capacity(cap);
+        let mut data: Vec<StateProb> = Vec::with_capacity(self.size_hint);
         offsets.push(0);
         let fwd_val = &self.fwd_val;
         let max_states = self.max_states;
-        let mut scr_haps = std::mem::take(&mut self.scr_haps);
-        let mut scr_probs = std::mem::take(&mut self.scr_probs);
-        let mut scr_probs_p1 = std::mem::take(&mut self.scr_probs_p1);
+        let mut scratch = std::mem::take(&mut self.scratch);
         self.states.replay(n_states, |m, state_haps| {
             let row = m * max_states;
             let row_p1 = if m < n_markers_m1 {
@@ -221,41 +220,43 @@ impl Baum {
             };
             let cur = &fwd_val[row..row + n_states];
             let nxt = &fwd_val[row_p1..row_p1 + n_states];
+            // Testing each state inline costs a mispredict whenever the
+            // keep rate is near a coin flip. Build the keep mask 64 states at
+            // a time (a branch-free comparison the compiler can vectorize),
+            // then walk only the set bits, so the work is one cheap pass over
+            // all states plus one iteration per state actually retained.
             let mut k = 0;
-            for j in 0..n_states {
-                let a = cur[j];
-                let b = nxt[j];
-                if a > threshold || b > threshold {
-                    scr_haps[k] = state_haps[j];
-                    scr_probs[k] = a;
-                    scr_probs_p1[k] = b;
+            for base in (0..n_states).step_by(64) {
+                let hi = (base + 64).min(n_states);
+                let mut mask = 0u64;
+                for j in base..hi {
+                    let keep = (cur[j] > threshold) | (nxt[j] > threshold);
+                    mask |= (keep as u64) << (j - base);
+                }
+                while mask != 0 {
+                    let j = base + mask.trailing_zeros() as usize;
+                    scratch[k] = StateProb {
+                        hap: state_haps[j],
+                        prob: cur[j],
+                        prob_p1: nxt[j],
+                    };
                     k += 1;
+                    mask &= mask - 1;
                 }
             }
-            haps.extend_from_slice(&scr_haps[..k]);
-            probs.extend_from_slice(&scr_probs[..k]);
-            probs_p1.extend_from_slice(&scr_probs_p1[..k]);
-            offsets.push(haps.len() as u32);
+            data.extend_from_slice(&scratch[..k]);
+            offsets.push(data.len() as u32);
         });
-        self.scr_haps = scr_haps;
-        self.scr_probs = scr_probs;
-        self.scr_probs_p1 = scr_probs_p1;
-        self.size_hint = haps.len();
+        self.scratch = scratch;
+        self.size_hint = data.len();
         // `size_hint` only approximates this haplotype's sparsity, so the rows
         // can retain spare capacity. Every target haplotype's rows are held at
         // once, so on large cohorts that waste dominates peak memory; reclaim
         // it when it is worth a copy.
-        if haps.capacity() > haps.len() + (haps.len() >> 3) {
-            haps.shrink_to_fit();
-            probs.shrink_to_fit();
-            probs_p1.shrink_to_fit();
+        if data.capacity() > data.len() + (data.len() >> 3) {
+            data.shrink_to_fit();
         }
-        StateProbs {
-            offsets,
-            haps,
-            probs,
-            probs_p1,
-        }
+        StateProbs { offsets, data }
     }
 }
 
