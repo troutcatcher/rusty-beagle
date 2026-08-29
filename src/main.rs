@@ -154,9 +154,20 @@ fn run(par: &Par, log: &mut Log) {
 
     let timing = std::env::var("RUSTY_BEAGLE_TIMING").is_ok();
     let mut window_count = 0usize;
-    // Main.rand: per-window seeds for phasing
-    let mut window_rand = javautil::JavaRandom::new(par.seed);
-    let mut overlap: Option<phasedata::PhasedOverlap> = None;
+    // Main.rand: per-window seeds for phasing. With ensemble=K each
+    // replicate keeps its own seed stream and its own phased overlap, so
+    // every replicate is a coherent phasing chain across windows; K=1 is
+    // exactly Beagle's behavior.
+    struct EnsChain {
+        rand: javautil::JavaRandom,
+        overlap: Option<phasedata::PhasedOverlap>,
+    }
+    let mut chains_state: Vec<EnsChain> = (0..par.ensemble)
+        .map(|j| EnsChain {
+            rand: javautil::JavaRandom::new(par.seed.wrapping_add(j as i64)),
+            overlap: None,
+        })
+        .collect();
     loop {
         let t_read = Instant::now();
         let window = match bg.next_window() {
@@ -181,72 +192,37 @@ fn run(par: &Par, log: &mut Log) {
             indices.n_targ_markers()
         ));
         let phased_input = window.targ_is_phased();
-        let seed = window_rand.next_long();
-        let phased_targ: Vec<Vec<i16>> = if phased_input && overlap.is_none() {
-            window.targ_recs.iter().map(|r| r.alleles.clone()).collect()
-        } else {
-            let t0 = Instant::now();
-            let fpd = std::sync::Arc::new(phasedata::FixedPhaseData::new(
+        let mut phased_all: Vec<Vec<Vec<i16>>> = Vec::with_capacity(par.ensemble);
+        let mut phase_secs: Option<f64> = None;
+        for (j, cs) in chains_state.iter_mut().enumerate() {
+            let seed = cs.rand.next_long();
+            let (phased, secs) = phase_window(
                 par,
                 genmap.as_ref(),
                 &window,
-                overlap.as_ref(),
-            ));
-            if phased_input {
-                fpd.targ.clone()
-            } else {
-                let mut pd = phasedata::PhaseData::new(fpd.clone(), par, seed);
-                if timing {
-                    eprintln!(
-                        "[timing] fpd+initphase: {:.3}s",
-                        t0.elapsed().as_secs_f64()
-                    );
-                }
-                let n_its = (par.burnin + par.iterations) as usize;
-                let max_burnin_swap_rate = 0.01f64;
-                while pd.it < n_its {
-                    let t_it = Instant::now();
-                    phasebaum::run_stage1(&mut pd, par);
-                    if timing {
-                        eprintln!(
-                            "[timing] stage1 it {}: {:.3}s",
-                            pd.it,
-                            t_it.elapsed().as_secs_f64()
-                        );
-                    }
-                    pd.increment_it(par);
-                    let swap_rate = phasedata::swap_rate_get_and_reset();
-                    if pd.it < par.burnin as usize && swap_rate <= max_burnin_swap_rate {
-                        pd.advance_to_first_phasing_it(par);
-                    }
-                }
-                let t_s2 = Instant::now();
-                let result = if fpd.n_stage1_markers() == fpd.targ.len() {
-                    stage2::stage1_marker_alleles(&pd)
-                } else {
-                    let (s2, stage1_alleles) = stage2::run_stage2(&pd, par);
-                    (0..fpd.targ.len())
-                        .map(|m| s2.alleles_at(&fpd, &|m1| stage1_alleles[m1].clone(), m))
-                        .collect()
-                };
-                if timing {
-                    eprintln!("[timing] stage2: {:.3}s", t_s2.elapsed().as_secs_f64());
-                }
-                log.println(&format!(
-                    "Phasing time     : {:.2} seconds",
-                    t0.elapsed().as_secs_f64()
-                ));
-                result
+                cs.overlap.as_ref(),
+                seed,
+                phased_input,
+                timing && j == 0,
+            );
+            if j == 0 {
+                phase_secs = secs;
+            } else if let (Some(t), Some(e)) = (phase_secs.as_mut(), secs) {
+                *t += e; // report the total across replicates
             }
-        };
+            phased_all.push(phased);
+        }
+        if let Some(secs) = phase_secs {
+            log.println(&format!("Phasing time     : {:.2} seconds", secs));
+        }
         let impute = indices.n_markers() != indices.n_targ_markers();
         if !impute {
             let m_start = indices.targ_prev_splice;
             let m_end = indices.targ_next_splice;
-            writer.print_phased(&window, &phased_targ, m_start, m_end);
-        } else {
+            writer.print_phased(&window, &phased_all[0], m_start, m_end);
+        } else if par.ensemble == 1 {
             let t0 = Instant::now();
-            let targ_alleles: Vec<Vec<u8>> = phased_targ
+            let targ_alleles: Vec<Vec<u8>> = phased_all[0]
                 .iter()
                 .map(|row| row.iter().map(|&a| a as u8).collect())
                 .collect();
@@ -273,17 +249,63 @@ fn run(par: &Par, log: &mut Log) {
                 "Imputation time  : {:.2} seconds",
                 t0.elapsed().as_secs_f64()
             ));
+        } else {
+            let t0 = Instant::now();
+            let mut built: Vec<(impdata::ImpData, Vec<hmm::StateProbs>)> =
+                Vec::with_capacity(par.ensemble);
+            for (j, ph) in phased_all.iter().enumerate() {
+                let targ_alleles: Vec<Vec<u8>> = ph
+                    .iter()
+                    .map(|row| row.iter().map(|&a| a as u8).collect())
+                    .collect();
+                let mut imp_data = impdata::ImpData::new(
+                    par,
+                    &window,
+                    genmap.as_ref(),
+                    &targ_samples,
+                    targ_alleles,
+                );
+                // distinct per-replicate seed for the IBS state selection
+                imp_data.seed = par.seed.wrapping_add(j as i64);
+                let ibs_haps = impibs::ImpIbs::new(&imp_data);
+                let state_probs = hmm::state_probs(&imp_data, &ibs_haps);
+                built.push((imp_data, state_probs));
+            }
+            let n_samples = targ_samples.len();
+            let swaps: Vec<Vec<bool>> = phased_all
+                .iter()
+                .map(|ph| phase_swaps(&phased_all[0], ph, n_samples))
+                .collect();
+            let chains: Vec<impout::EnsembleChain> = built
+                .iter()
+                .zip(swaps.iter())
+                .map(|((imp_data, state_probs), swap)| impout::EnsembleChain {
+                    imp_data,
+                    state_probs,
+                    swap,
+                })
+                .collect();
+            let m_start = indices.prev_splice;
+            let m_end = indices.next_splice;
+            writer.print_imputed_multi(&chains, &window, m_start, m_end);
+            log.println(&format!(
+                "Imputation time  : {:.2} seconds ({} replicates)",
+                t0.elapsed().as_secs_f64(),
+                par.ensemble
+            ));
         }
-        // phased overlap for the next window
+        // phased overlap for the next window, per replicate chain
         let o_start = indices.targ_overlap_start;
         let o_end = indices.targ_next_splice;
-        overlap = if o_end > o_start {
-            Some(phasedata::PhasedOverlap {
-                alleles: phased_targ[o_start..o_end].to_vec(),
-            })
-        } else {
-            None
-        };
+        for (cs, phased) in chains_state.iter_mut().zip(phased_all.iter()) {
+            cs.overlap = if o_end > o_start {
+                Some(phasedata::PhasedOverlap {
+                    alleles: phased[o_start..o_end].to_vec(),
+                })
+            } else {
+                None
+            };
+        }
     }
     writer.close();
     let stats = bg.finish();
@@ -291,6 +313,91 @@ fn run(par: &Par, log: &mut Log) {
         "\nCumulative Statistics:\nReference markers: {}\nStudy     markers: {}\nWindows:           {}",
         stats.cum_ref_markers, stats.cum_targ_markers, window_count
     ));
+}
+
+
+/// Phases one window's target genotypes (or passes them through when the
+/// input is already phased and no overlap needs splicing). Returns the
+/// phased alleles and, when the phasing HMM actually ran, its wall time.
+fn phase_window(
+    par: &Par,
+    genmap: &genmap::GeneticMap,
+    window: &windows::Window,
+    overlap: Option<&phasedata::PhasedOverlap>,
+    seed: i64,
+    phased_input: bool,
+    timing: bool,
+) -> (Vec<Vec<i16>>, Option<f64>) {
+    if phased_input && overlap.is_none() {
+        let out = window.targ_recs.iter().map(|r| r.alleles.clone()).collect();
+        return (out, None);
+    }
+    let t0 = Instant::now();
+    let fpd = std::sync::Arc::new(phasedata::FixedPhaseData::new(par, genmap, window, overlap));
+    if phased_input {
+        return (fpd.targ.clone(), None);
+    }
+    let mut pd = phasedata::PhaseData::new(fpd.clone(), par, seed);
+    if timing {
+        eprintln!("[timing] fpd+initphase: {:.3}s", t0.elapsed().as_secs_f64());
+    }
+    let n_its = (par.burnin + par.iterations) as usize;
+    let max_burnin_swap_rate = 0.01f64;
+    while pd.it < n_its {
+        let t_it = Instant::now();
+        phasebaum::run_stage1(&mut pd, par);
+        if timing {
+            eprintln!(
+                "[timing] stage1 it {}: {:.3}s",
+                pd.it,
+                t_it.elapsed().as_secs_f64()
+            );
+        }
+        pd.increment_it(par);
+        let swap_rate = phasedata::swap_rate_get_and_reset();
+        if pd.it < par.burnin as usize && swap_rate <= max_burnin_swap_rate {
+            pd.advance_to_first_phasing_it(par);
+        }
+    }
+    let t_s2 = Instant::now();
+    let result = if fpd.n_stage1_markers() == fpd.targ.len() {
+        stage2::stage1_marker_alleles(&pd)
+    } else {
+        let (s2, stage1_alleles) = stage2::run_stage2(&pd, par);
+        (0..fpd.targ.len())
+            .map(|m| s2.alleles_at(&fpd, &|m1| stage1_alleles[m1].clone(), m))
+            .collect()
+    };
+    if timing {
+        eprintln!("[timing] stage2: {:.3}s", t_s2.elapsed().as_secs_f64());
+    }
+    (result, Some(t0.elapsed().as_secs_f64()))
+}
+
+/// Per-sample haplotype orientation of `other`'s phasing relative to
+/// `base`'s, by majority vote over markers both replicates phase as the
+/// same heterozygous genotype. Used to align ensemble replicates before
+/// averaging per-haplotype probabilities.
+fn phase_swaps(base: &[Vec<i16>], other: &[Vec<i16>], n_samples: usize) -> Vec<bool> {
+    (0..n_samples)
+        .map(|s| {
+            let (h1, h2) = (2 * s, 2 * s + 1);
+            let mut agree = 0i32;
+            let mut disagree = 0i32;
+            for m in 0..base.len() {
+                let (a, b) = (base[m][h1], base[m][h2]);
+                let (c, d) = (other[m][h1], other[m][h2]);
+                if a != b && c != d && ((a == c && b == d) || (a == d && b == c)) {
+                    if a == c {
+                        agree += 1;
+                    } else {
+                        disagree += 1;
+                    }
+                }
+            }
+            disagree > agree
+        })
+        .collect()
 }
 
 /// Writes run info to stdout and to `<out>.log` (like `main.RunStats`).

@@ -43,6 +43,9 @@ pub struct Par {
     pub buffer: f32,
     pub seed: i64,
     pub nthreads: usize,
+    /// Number of imputation replicates averaged into the output (rusty-beagle
+    /// extension; 1 = plain Beagle behavior, bit-identical to Java).
+    pub ensemble: usize,
 
     /// Species preset applied (rusty-beagle extension; not a Java Beagle
     /// parameter). Records the parameters it filled in, for the run log.
@@ -138,6 +141,11 @@ data parameters ...
   preset=<species preset: cattle>                    (optional; rusty-beagle
         extension: fills in defaults tuned for the species -- currently
         ne=1000 for cattle -- for any parameter not given explicitly)
+  ensemble=<imputation replicates to average>        (default=1; rusty-beagle
+        extension: runs the stochastic phasing/imputation K times with
+        distinct seeds and averages the allele probabilities, which
+        measurably raises dosage-r2 accuracy at ~K-fold run time; 1 keeps
+        output bit-identical to Java Beagle)
   ref=<VCF file with phased genotypes>               (optional)
   out=<output file prefix>                           (required)
   map=<PLINK map file with cM units>                 (optional)
@@ -291,6 +299,12 @@ impl Par {
             None => std::thread::available_parallelism().map_or(1, |n| n.get()),
             Some(v) => parse_or_exit("nthreads", &v),
         };
+        let ensemble: usize =
+            get(&mut map, "ensemble").map_or(1, |v| parse_or_exit("ensemble", &v));
+        if ensemble < 1 {
+            eprintln!("ERROR: ensemble must be >= 1");
+            exit(1);
+        }
         // Accept and ignore documented phasing-only params so Beagle command
         // lines run unchanged.
         for k in ["truth", "ped"] {
@@ -334,6 +348,7 @@ impl Par {
             buffer,
             seed,
             nthreads,
+            ensemble,
             preset,
         }
     }

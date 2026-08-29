@@ -655,6 +655,159 @@ fn append_records(
     out
 }
 
+/// One ensemble replicate's imputation results for a window
+/// (`ensemble=K` mode; see `append_records_multi`).
+pub struct EnsembleChain<'a> {
+    pub imp_data: &'a ImpData,
+    pub state_probs: &'a [StateProbs],
+    /// per-sample: true when this replicate phases haplotypes in the
+    /// opposite orientation to replicate 0 (majority vote over shared
+    /// phased-het markers in the window)
+    pub swap: &'a [bool],
+}
+
+/// Ensemble variant of `append_records`: accumulates each replicate's
+/// per-haplotype allele probabilities (haplotype-aligned via `swap`) and
+/// feeds the sums to the record builder, whose `scale()` normalization turns
+/// them into the ensemble mean. DS/AP are exact means of the replicate
+/// values; GP is the product form over mean haplotype probabilities; GT is
+/// the per-haplotype argmax of the mean. The cluster structure is identical
+/// across replicates (it depends only on marker positions and reference
+/// block boundaries), so replicate 0's bounds serve for all.
+#[allow(clippy::too_many_arguments)]
+fn append_records_multi(
+    chains: &[EnsembleChain],
+    window: &Window,
+    samples: &Samples,
+    win_ref_start: usize,
+    win_ref_end: usize,
+    targ_cluster: usize,
+    fmt: &Fmt,
+    hom_ref: &[String],
+    scratch_out: &mut OutScratch,
+) -> String {
+    let imp_data0 = chains[0].imp_data;
+    let ref_start = if targ_cluster == 0 {
+        win_ref_start
+    } else {
+        win_ref_start.max(imp_data0.ref_cluster_start[targ_cluster])
+    };
+    let (clust_end, ref_end) = if targ_cluster < imp_data0.n_clusters - 1 {
+        let tmp_clust_end = win_ref_start.max(imp_data0.ref_cluster_end[targ_cluster]);
+        (
+            tmp_clust_end.min(win_ref_end),
+            imp_data0.ref_cluster_start[targ_cluster + 1].min(win_ref_end),
+        )
+    } else {
+        (win_ref_end, win_ref_end)
+    };
+    let mut out = String::new();
+    if ref_start >= ref_end {
+        return out;
+    }
+    let ref_recs = &window.ref_recs;
+    let _ = scratch_out; // per-chain hashes need their own index buffers
+    let mut bufs: Vec<(Vec<u32>, Vec<u64>)> =
+        (0..chains.len()).map(|_| (Vec::new(), Vec::new())).collect();
+    let hashes: Vec<RefHapHash> = chains
+        .iter()
+        .zip(bufs.iter_mut())
+        .map(|(ch, (hti, seen))| {
+            RefHapHash::new(
+                ch.state_probs,
+                targ_cluster,
+                ref_recs,
+                ch.imp_data.n_ref_haps,
+                hti,
+                seen,
+                ref_start,
+                ref_end,
+            )
+        })
+        .collect();
+    let n_markers = ref_end - ref_start;
+    let mut rec_builders: Vec<ImputedRecBuilder> = (ref_start..ref_end)
+        .map(|m| {
+            ImputedRecBuilder::new(
+                &ref_recs[m].marker,
+                imp_data0.n_input_targ_haps,
+                imp_data0.ap,
+                imp_data0.gp,
+                fmt,
+                hom_ref,
+            )
+        })
+        .collect();
+    let mut al_off: Vec<u32> = Vec::with_capacity(n_markers + 1);
+    let mut total = 0u32;
+    for m in ref_start..ref_end {
+        al_off.push(total);
+        total += ref_recs[m].marker.n_alleles as u32;
+    }
+    al_off.push(total);
+    let total = total as usize;
+    let mut t1: Vec<f32> = vec![0.0; total]; // one replicate's hap-1 probs
+    let mut t2: Vec<f32> = vec![0.0; total];
+    let mut acc1: Vec<f32> = vec![0.0; total]; // accumulated across replicates
+    let mut acc2: Vec<f32> = vec![0.0; total];
+    let is_imputed: Vec<bool> = (ref_start..ref_end)
+        .map(|m| window.indices.marker_to_targ_marker[m] == -1)
+        .collect();
+
+    let mut scratch = SetAlProbsScratch::new(n_markers);
+    let n = chains[0].state_probs.len();
+    let mut h = 0;
+    while h < n {
+        let sample = h >> 1;
+        let is_diploid = samples.is_diploid[sample];
+        acc1.fill(0.0);
+        acc2.fill(0.0);
+        for (ch, rhh) in chains.iter().zip(hashes.iter()) {
+            t1.fill(0.0);
+            t2.fill(0.0);
+            set_al_probs(
+                ch.imp_data, &ch.state_probs[h], rhh, targ_cluster,
+                ref_start, clust_end, ref_end, &mut t1, &al_off, &mut scratch,
+            );
+            set_al_probs(
+                ch.imp_data, &ch.state_probs[h + 1], rhh, targ_cluster,
+                ref_start, clust_end, ref_end, &mut t2, &al_off, &mut scratch,
+            );
+            for m in 0..n_markers {
+                if !is_imputed[m] {
+                    set_to_obs_alleles(
+                        ch.imp_data, window, ref_start, m, h, &mut t1, &mut t2, &al_off,
+                    );
+                }
+            }
+            let (u1, u2): (&[f32], &[f32]) = if ch.swap[sample] {
+                (&t2, &t1)
+            } else {
+                (&t1, &t2)
+            };
+            for (a, &v) in acc1.iter_mut().zip(u1) {
+                *a += v;
+            }
+            for (a, &v) in acc2.iter_mut().zip(u2) {
+                *a += v;
+            }
+        }
+        for m in 0..n_markers {
+            let (lo, hi) = (al_off[m] as usize, al_off[m + 1] as usize);
+            if is_diploid {
+                rec_builders[m].add_sample_data2(&mut acc1[lo..hi], &mut acc2[lo..hi]);
+            } else {
+                rec_builders[m].add_sample_data1(&mut acc1[lo..hi]);
+            }
+        }
+        h += 2;
+    }
+    for (m, rb) in rec_builders.iter().enumerate() {
+        rb.print_rec(&mut out, is_imputed[m]);
+    }
+    out
+}
+
 struct SetAlProbsScratch {
     indices: Vec<usize>,
     hashes: Vec<i32>,
@@ -840,6 +993,42 @@ impl WindowWriter {
                 OUT_NANOS[4].load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9,
             );
         }
+        for chunk in chunks {
+            if !chunk.is_empty() {
+                self.file.write_all(&chunk).expect("write VCF records");
+            }
+        }
+    }
+
+    /// Ensemble variant of `print_imputed` (`ensemble=K`).
+    pub fn print_imputed_multi(
+        &mut self,
+        chains: &[EnsembleChain],
+        window: &Window,
+        start: usize,
+        end: usize,
+    ) {
+        let chunks: Vec<Vec<u8>> = (0..chains[0].imp_data.n_clusters)
+            .into_par_iter()
+            .map_init(OutScratch::default, |scratch_out, c| {
+                let text = append_records_multi(
+                    chains,
+                    window,
+                    &self.samples,
+                    start,
+                    end,
+                    c,
+                    &self.fmt,
+                    &self.hom_ref,
+                    scratch_out,
+                );
+                if text.is_empty() {
+                    Vec::new()
+                } else {
+                    bgzf::compress(text.as_bytes())
+                }
+            })
+            .collect();
         for chunk in chunks {
             if !chunk.is_empty() {
                 self.file.write_all(&chunk).expect("write VCF records");

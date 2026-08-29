@@ -78,8 +78,19 @@ plateau at every panel size we measured:
   demography: r² +0.50 at an 800-haplotype reference, +0.05 at 20,000
   haplotypes.
 
-Java Beagle users get the same gain by passing `ne=1000` explicitly. Full
-methodology, sweep tables and reproduction commands: `tests/bovine/README.md`.
+Java Beagle users get the same gain by passing `ne=1000` explicitly.
+
+On top of that, `ensemble=K` (also a rusty-beagle extension, default 1 =
+bit-identical) runs the seeded-stochastic phasing/imputation K times
+internally, aligns the replicates' haplotypes, and averages the allele
+probabilities. At K=5 it adds a further +0.02 to +0.06 dosage r² on every
+bovine dataset tested (largest on sparse chips and small references, where
+phasing noise dominates), at ~K-fold run time. Unlike the preset this is a
+genuine algorithm extension: single-run Java Beagle cannot reproduce it,
+though averaging K separate Java runs' DS fields gets most of the way.
+
+Full methodology, sweep tables and reproduction commands:
+`tests/bovine/README.md`.
 
 ## Correctness
 

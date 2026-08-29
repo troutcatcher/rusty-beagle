@@ -9,8 +9,11 @@ segments that make livestock imputation easy. Fixing `ne` is the single
 largest accuracy lever we found; `preset=cattle` applies it.
 
 ```
-rusty-beagle gt=chip.vcf.gz ref=panel.bref3 out=imputed preset=cattle nthreads=8
+rusty-beagle gt=chip.vcf.gz ref=panel.bref3 out=imputed preset=cattle ensemble=4 nthreads=8
 ```
+
+(`ensemble=4` is optional and costs ~4x run time; see the ensemble section
+below for what it buys.)
 
 `preset=cattle` (alias `bovine`) currently expands to `ne=1000`. Explicitly
 passed parameters always override the preset, and the run log records what
@@ -81,6 +84,39 @@ ne=1000 is within ~0.01 of the measured peak in every condition, real and
 simulated, which is why the preset uses it. At the 20,000-haplotype panel,
 `err=0.01` and `imp-states=3200` each added <= 0.005 r² but showed no gain
 on the real data, so the preset leaves them at Beagle defaults.
+
+## Ensemble imputation (`ensemble=K`)
+
+Beagle's pipeline is seeded-stochastic in two places: phasing of the
+unphased target and the random subsetting inside IBS state selection.
+`ensemble=K` runs K replicates of that stochastic pipeline internally —
+each with its own seed stream and its own window-overlap continuity, so
+each replicate is a coherent phasing of the whole input — aligns each
+replicate's haplotypes to replicate 0 (majority vote over shared phased
+hets, so oppositely-phased hets don't cancel), and averages the
+per-haplotype allele probabilities. DS and AP become exact ensemble means;
+GT is the per-haplotype argmax of the mean; GP is the product form over
+mean haplotype probabilities. Run time scales ~K-fold; `ensemble=1`
+(default) is bit-identical to Java Beagle.
+
+Measured gains at ne=1000 (in-code, K=5, seeds 1–5):
+
+| dataset | single | ensemble=5 |
+|---|---|---|
+| real bulls, every-5th-marker targets | 0.769 | **0.790** |
+| real bulls, every-10th-marker targets | 0.493 | **0.548** |
+| simulated, 800-hap reference | 0.789 | 0.836 |
+| simulated, 20,000-hap reference | 0.836 | **0.878** |
+
+The K-curve on the dense real panel: K=2 → 0.782, K=3 → 0.786, K=5 →
+0.790, K=10 → 0.793; K=4–5 is the practical sweet spot. The gain is
+largest exactly where imputation is hardest (sparse chips, small
+references) because that is where phasing noise dominates.
+
+Two-pass cohort imputation (appending the imputed cohort to the reference
+and re-imputing) was also tested and **hurt** (r² 0.769 → 0.742 on the real
+data): the pseudo-reference feedback pollutes a clean panel. It is not
+implemented.
 
 ## Reproducing
 

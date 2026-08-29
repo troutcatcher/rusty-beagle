@@ -38,7 +38,8 @@ def load_imputed(path, want):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--imputed", required=True)
+    ap.add_argument("--imputed", required=True, nargs="+",
+                    help="one VCF, or several to average DS across (ensemble)")
     ap.add_argument("--truth", required=True)
     ap.add_argument("--label", default="")
     a = ap.parse_args()
@@ -46,7 +47,16 @@ def main():
     t = np.load(a.truth, allow_pickle=True)
     truth, samples = t["truth"], list(t["samples"])
     keys = list(zip(t["chrom"].tolist(), t["pos"].tolist()))
-    imputed, vcf_samples = load_imputed(a.imputed, set(keys))
+    runs = [load_imputed(f, set(keys)) for f in a.imputed]
+    vcf_samples = runs[0][1]
+    if len(runs) == 1:
+        imputed = runs[0][0]
+    else:
+        # ensemble: average DS across runs; best-guess GT = rounded mean DS
+        imputed = {}
+        for key in runs[0][0]:
+            ds = np.mean([r[0][key][0] for r in runs], axis=0)
+            imputed[key] = (ds, np.clip(np.round(ds), 0, 2).astype(np.int8))
     if vcf_samples != samples:
         order = [vcf_samples.index(s) for s in samples]
     else:
