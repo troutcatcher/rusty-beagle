@@ -71,6 +71,22 @@ fn main() {
         log.println(&format!("map            : {}", m));
     }
     log.println(&format!("seed           : {}", par.seed));
+    if let Some(preset) = &par.preset {
+        let applied: Vec<String> = preset
+            .applied
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+        log.println(&format!(
+            "preset         : {} ({})",
+            preset.name,
+            if applied.is_empty() {
+                "all parameters overridden explicitly".to_string()
+            } else {
+                applied.join(" ")
+            }
+        ));
+    }
 
     run(&par, &mut log);
 

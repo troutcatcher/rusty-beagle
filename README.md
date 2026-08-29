@@ -62,6 +62,25 @@ Not (yet) ported: reference-free phasing — `ref=` is required. Old-format
 `.bref` (not `.bref3`) files are not supported, matching Java Beagle, which
 also rejects them.
 
+## Species presets: bovine accuracy
+
+Beagle's `ne=100000` default is calibrated for human panels; cattle have an
+effective population size near 100, and the imputation HMM's switch rate
+scales with `0.04*ne/nRefHaps`. `preset=cattle` (a rusty-beagle extension;
+explicit parameters always override it, and without it output stays
+bit-identical to Java Beagle) applies `ne=1000`, which sits on the accuracy
+plateau at every panel size we measured:
+
+- 500 real dairy bulls (public synbreedData panel, sire-family-aware 5-fold
+  CV, LD-chip targets imputed to the 7,250-marker panel): masked-marker
+  dosage r² **0.36 → 0.77**, concordance 0.70 → 0.91.
+- Coalescent panels under the published MacLeod et al. (2013) Holstein
+  demography: r² +0.50 at an 800-haplotype reference, +0.05 at 20,000
+  haplotypes.
+
+Java Beagle users get the same gain by passing `ne=1000` explicitly. Full
+methodology, sweep tables and reproduction commands: `tests/bovine/README.md`.
+
 ## Correctness
 
 `tests/compare_beagle.sh` runs Java Beagle and rusty-beagle on the same input
