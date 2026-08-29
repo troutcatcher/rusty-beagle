@@ -388,40 +388,98 @@ pub fn read_exclude_file(path: &Option<String>) -> HashSet<String> {
 }
 
 /// Iterator over the data lines of a VCF file.
+/// Reads VCF data lines in batches into one reusable byte buffer, handing
+/// out `&str` slices into it.  Reference-panel lines are large (one field
+/// per sample, so ~25 KB at 5,000 samples), which made a `String` per line
+/// costly: each allocation regrew from empty through a dozen reallocations.
+/// A shared buffer amortizes that to one append per line.
 pub struct LineSource {
     reader: Box<dyn BufRead + Send>,
+    /// raw bytes of the current batch, newlines included
+    buf: Vec<u8>,
+    /// byte ranges of the batch's lines within `buf`, EOL stripped
+    ranges: Vec<(usize, usize)>,
+    /// index of the next line to hand out from `ranges` (single-line API)
+    cursor: usize,
     pending: Option<String>,
-    buf: String,
+    eof: bool,
 }
 
 impl LineSource {
     pub fn new(reader: Box<dyn BufRead + Send>, first_data_line: Option<String>) -> Self {
         LineSource {
             reader,
+            buf: Vec::new(),
+            ranges: Vec::new(),
+            cursor: 0,
             pending: first_data_line,
-            buf: String::new(),
+            eof: false,
         }
     }
 
-    pub fn next_line(&mut self) -> Option<String> {
-        if let Some(line) = self.pending.take() {
-            return Some(line);
+    /// Reads up to `max_lines` non-blank lines into the internal buffer,
+    /// replacing any previous batch.  Returns the number of lines read;
+    /// they are then accessible via `line(i)`.
+    pub fn fill_batch(&mut self, max_lines: usize) -> usize {
+        self.buf.clear();
+        self.ranges.clear();
+        self.cursor = 0;
+        if let Some(first) = self.pending.take() {
+            self.buf.extend_from_slice(first.as_bytes());
+            self.ranges.push((0, self.buf.len()));
         }
-        loop {
-            self.buf.clear();
-            let n = self.reader.read_line(&mut self.buf).unwrap_or_else(|e| {
+        while self.ranges.len() < max_lines && !self.eof {
+            let start = self.buf.len();
+            let n = self.reader.read_until(b'\n', &mut self.buf).unwrap_or_else(|e| {
                 eprintln!("ERROR: I/O error reading VCF file: {}", e);
                 std::process::exit(1)
             });
             if n == 0 {
-                return None;
+                self.eof = true;
+                break;
             }
-            while self.buf.ends_with('\n') || self.buf.ends_with('\r') {
-                self.buf.pop();
+            let mut end = self.buf.len();
+            while end > start && (self.buf[end - 1] == b'\n' || self.buf[end - 1] == b'\r') {
+                end -= 1;
             }
-            if !self.buf.is_empty() {
-                return Some(std::mem::take(&mut self.buf));
+            if end > start {
+                self.ranges.push((start, end));
+            } else {
+                self.buf.truncate(start); // blank line
             }
         }
+        self.ranges.len()
+    }
+
+    /// The `i`-th line of the current batch.
+    #[inline]
+    pub fn line(&self, i: usize) -> &str {
+        let (s, e) = self.ranges[i];
+        std::str::from_utf8(&self.buf[s..e]).unwrap_or_else(|_| {
+            eprintln!("ERROR: VCF file contains invalid UTF-8");
+            std::process::exit(1)
+        })
+    }
+
+    /// The current batch as `&str` slices, for parallel parsing.
+    pub fn batch(&self) -> Vec<&str> {
+        (0..self.ranges.len()).map(|i| self.line(i)).collect()
+    }
+
+    /// Single-line access (used for target records, which are parsed one at
+    /// a time); refills the batch buffer as needed.
+    pub fn next_line(&mut self) -> Option<&str> {
+        if self.cursor == self.ranges.len() {
+            if self.fill_batch(LINE_BATCH) == 0 {
+                return None;
+            }
+        }
+        let i = self.cursor;
+        self.cursor += 1;
+        Some(self.line(i))
     }
 }
+
+/// Lines per read batch; keeps the shared buffer to a few MB even for
+/// reference panels with thousands of samples.
+pub const LINE_BATCH: usize = 512;

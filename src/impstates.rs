@@ -53,9 +53,10 @@ pub struct ImpStates {
     q: JavaPriorityQueue<CompHapSegment>,
     comp_hap_hap: Vec<Vec<i32>>,
     comp_hap_end: Vec<Vec<i32>>,
-    comp_hap_to_list_index: Vec<usize>,
     comp_hap_to_hap: Vec<i32>,
-    comp_hap_to_end: Vec<i32>,
+    /// segment transitions as `(cluster, comp_hap_index, new_hap)`, sorted by
+    /// cluster; see `build_events`
+    events: Vec<(u32, u32, i32)>,
     cache_seq: Vec<u16>,
     dirty: Vec<u32>,
 }
@@ -70,9 +71,8 @@ impl ImpStates {
             q: JavaPriorityQueue::new(),
             comp_hap_hap: vec![Vec::new(); max_states],
             comp_hap_end: vec![Vec::new(); max_states],
-            comp_hap_to_list_index: vec![0; max_states],
             comp_hap_to_hap: vec![0; max_states],
-            comp_hap_to_end: vec![0; max_states],
+            events: Vec::new(),
             cache_seq: vec![0; max_states],
             dirty: Vec::new(),
         }
@@ -176,10 +176,11 @@ impl ImpStates {
         // initializeCopy
         for j in 0..n_comp_haps {
             self.comp_hap_end[j].push(self.n_clusters as i32); // add missing end of last segment
-            self.comp_hap_to_list_index[j] = 0;
-            self.comp_hap_to_hap[j] = self.comp_hap_hap[j][0];
-            self.comp_hap_to_end[j] = self.comp_hap_end[j][0];
         }
+        self.build_events(n_comp_haps);
+        self.reset_comp_haps(n_comp_haps);
+        let events = std::mem::take(&mut self.events);
+        let mut ev = 0usize;
         let n_ref = imp_data.n_ref_haps;
         // Per-state cache of the seq-coded block sequence index
         // (hap2seq[state hap]): valid while the state's haplotype and the
@@ -193,16 +194,11 @@ impl ImpStates {
         for m in 0..self.n_clusters {
             let targ_allele = imp_data.allele(m, shifted_targ_hap);
             let row = m * words_per_row;
-            let m_i32 = m as i32;
-            for j in 0..n_comp_haps {
-                if m_i32 == self.comp_hap_to_end[j] {
-                    self.comp_hap_to_list_index[j] += 1;
-                    self.comp_hap_to_hap[j] =
-                        self.comp_hap_hap[j][self.comp_hap_to_list_index[j]];
-                    self.comp_hap_to_end[j] =
-                        self.comp_hap_end[j][self.comp_hap_to_list_index[j]];
-                    self.dirty.push(j as u32);
-                }
+            while ev < events.len() && events[ev].0 as usize == m {
+                let (_, j, new_hap) = events[ev];
+                self.comp_hap_to_hap[j as usize] = new_hap;
+                self.dirty.push(j);
+                ev += 1;
             }
             let haps = &self.comp_hap_to_hap[..n_comp_haps];
             let match_out = &mut al_match[row..row + words_per_row];
@@ -268,30 +264,64 @@ impl ImpStates {
                 }
             }
         }
+        self.events = events;
         n_comp_haps
+    }
+
+    /// Resets each composite haplotype to its first segment.
+    fn reset_comp_haps(&mut self, n_comp_haps: usize) {
+        for j in 0..n_comp_haps {
+            self.comp_hap_to_hap[j] = self.comp_hap_hap[j][0];
+        }
+    }
+
+    /// Precomputes the cluster at which each composite haplotype switches to
+    /// its next segment, replacing the per-cluster scan over all states with
+    /// a cursor over the (far shorter) list of actual transitions.
+    ///
+    /// Java advances a composite haplotype at most once per cluster, testing
+    /// only its current segment end, so a segment whose end is not strictly
+    /// past the previous transition can never fire and pins the composite
+    /// haplotype on its current segment for the rest of the window; the
+    /// `end <= last_fired` break reproduces that exactly.
+    fn build_events(&mut self, n_comp_haps: usize) {
+        let mut events = std::mem::take(&mut self.events);
+        events.clear();
+        let n_clusters = self.n_clusters as i64;
+        for j in 0..n_comp_haps {
+            let haps = &self.comp_hap_hap[j];
+            let ends = &self.comp_hap_end[j];
+            let mut idx = 0usize;
+            let mut last_fired: i64 = -1;
+            loop {
+                let end = ends[idx] as i64;
+                if end >= n_clusters || end <= last_fired {
+                    break;
+                }
+                idx += 1;
+                events.push((end as u32, j as u32, haps[idx]));
+                last_fired = end;
+            }
+        }
+        events.sort_unstable_by_key(|e| e.0);
+        self.events = events;
     }
 
     /// Re-walks the composite-haplotype segments from the last `ibs_states`
     /// call, handing the per-cluster state haplotypes to `f(m, haps)`.
     pub fn replay<F: FnMut(usize, &[i32])>(&mut self, n_comp_haps: usize, mut f: F) {
-        for j in 0..n_comp_haps {
-            self.comp_hap_to_list_index[j] = 0;
-            self.comp_hap_to_hap[j] = self.comp_hap_hap[j][0];
-            self.comp_hap_to_end[j] = self.comp_hap_end[j][0];
-        }
+        self.reset_comp_haps(n_comp_haps);
+        let events = std::mem::take(&mut self.events);
+        let mut ev = 0usize;
         for m in 0..self.n_clusters {
-            let m_i32 = m as i32;
-            for j in 0..n_comp_haps {
-                if m_i32 == self.comp_hap_to_end[j] {
-                    self.comp_hap_to_list_index[j] += 1;
-                    self.comp_hap_to_hap[j] =
-                        self.comp_hap_hap[j][self.comp_hap_to_list_index[j]];
-                    self.comp_hap_to_end[j] =
-                        self.comp_hap_end[j][self.comp_hap_to_list_index[j]];
-                }
+            while ev < events.len() && events[ev].0 as usize == m {
+                let (_, j, new_hap) = events[ev];
+                self.comp_hap_to_hap[j as usize] = new_hap;
+                ev += 1;
             }
             f(m, &self.comp_hap_to_hap[..n_comp_haps]);
         }
+        self.events = events;
     }
 
     fn fill_q_with_random_haps(&mut self, imp_data: &ImpData, targ_hap: usize) {

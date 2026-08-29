@@ -135,11 +135,16 @@ impl TargReader {
 
     pub fn next(&mut self) -> Option<Arc<GtRec>> {
         loop {
-            let line = self.lines.next_line()?;
-            let rec = crate::vcfio::parse_gt_rec(&self.header, &line).unwrap_or_else(|e| {
-                eprintln!("ERROR: {}", e);
-                std::process::exit(1)
-            });
+            // the line slice borrows `lines`, so split the borrow to parse
+            // it against `header`; the borrow ends with the block
+            let rec = {
+                let TargReader { header, lines, .. } = &mut *self;
+                let line = lines.next_line()?;
+                crate::vcfio::parse_gt_rec(header, line).unwrap_or_else(|e| {
+                    eprintln!("ERROR: {}", e);
+                    std::process::exit(1)
+                })
+            };
             if self.accept(&rec.marker) {
                 return Some(Arc::new(rec));
             }

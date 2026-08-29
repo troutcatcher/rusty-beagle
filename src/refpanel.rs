@@ -630,26 +630,19 @@ impl RefReader {
     /// run through the sequence coder in order.
     fn fill(&mut self) {
         use rayon::prelude::*;
-        const BATCH: usize = 512;
         while self.out.is_empty() && !self.done {
-            let mut batch: Vec<String> = Vec::with_capacity(BATCH);
-            while batch.len() < BATCH {
-                match self.lines.next_line() {
-                    Some(line) => batch.push(line),
-                    None => {
-                        self.done = true;
-                        break;
-                    }
-                }
+            if self.lines.fill_batch(crate::vcfio::LINE_BATCH) < crate::vcfio::LINE_BATCH {
+                self.done = true;
             }
+            let batch = self.lines.batch();
+            let header = &self.header;
             let parsed: Vec<(Marker, u8, Vec<Vec<u32>>)> = batch
                 .par_iter()
                 .map_init(Vec::new, |buf, line| {
-                    let marker =
-                        parse_ref_rec(&self.header, line, buf).unwrap_or_else(|e| {
-                            eprintln!("ERROR: {}", e);
-                            std::process::exit(1)
-                        });
+                    let marker = parse_ref_rec(header, line, buf).unwrap_or_else(|e| {
+                        eprintln!("ERROR: {}", e);
+                        std::process::exit(1)
+                    });
                     let (major, carriers) =
                         to_allele_coded(buf, marker.n_alleles as usize);
                     (marker, major, carriers)
