@@ -88,6 +88,9 @@ impl<'a> RefHapHash<'a> {
         let mut staged: Vec<(u32, u32, u32)> = Vec::with_capacity(4 * n);
         let mut counts = vec![0u32; n + 1];
         let mut allele_hash: Vec<i32> = Vec::new();
+        // block sequence of each `i2hap` entry, valid while `cached_block` holds
+        let mut seq_of: Vec<u16> = Vec::with_capacity(n);
+        let mut cached_block: Option<u32> = None;
         for m in self.start..self.end {
             let rec = &self.ref_recs[m];
             let marker_offset = (m - self.start) as u32;
@@ -114,6 +117,36 @@ impl<'a> RefHapHash<'a> {
                                     counts[i + 1] += 1;
                                 }
                             }
+                        }
+                    }
+                }
+                RefAlleles::SeqCoded {
+                    block,
+                    hap2seq,
+                    seq2allele,
+                } => {
+                    // hap2seq is shared by every marker of a sequence-coded
+                    // block, so resolve each haplotype's sequence once per
+                    // block instead of once per marker: the per-marker lookup
+                    // then hits the small seq2allele table rather than the
+                    // panel-sized hap2seq.
+                    if cached_block != Some(*block) {
+                        seq_of.clear();
+                        seq_of.extend(self.i2hap.iter().map(|&h| hap2seq[h as usize]));
+                        cached_block = Some(*block);
+                    }
+                    let n_alleles = rec.marker.n_alleles as usize;
+                    allele_hash.clear();
+                    allele_hash.push(0);
+                    for _ in 1..n_alleles {
+                        allele_hash.push(rand.next_int());
+                    }
+                    for (i, &s) in seq_of.iter().enumerate() {
+                        let allele = seq2allele[s as usize] as usize;
+                        if allele != 0 {
+                            self.i2hash[i] = self.i2hash[i].wrapping_add(allele_hash[allele]);
+                            staged.push((i as u32, marker_offset, allele as u32));
+                            counts[i + 1] += 1;
                         }
                     }
                 }

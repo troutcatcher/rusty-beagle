@@ -54,7 +54,9 @@ pub struct MatchBits {
 impl MatchBits {
     fn build(codes: &[u32], n_codes: usize) -> MatchBits {
         let stride = (codes.len() + 63) >> 6;
-        let mut words = vec![0u64; n_codes * stride];
+        // one extra, permanently zero row, so an out-of-range code resolves
+        // to "nothing matches" without a per-lookup branch in the hot loop
+        let mut words = vec![0u64; (n_codes + 1) * stride];
         for (i, &c) in codes.iter().enumerate() {
             debug_assert!((c as usize) < n_codes);
             words[(c as usize) * stride + (i >> 6)] |= 1u64 << (i & 63);
@@ -66,25 +68,18 @@ impl MatchBits {
         }
     }
 
-    /// The bitset for `code`, or `None` when no entry carries it.
+    /// The bitset for `code`; an out-of-range code maps to the zero row.
     #[inline]
-    pub fn row(&self, code: u32) -> Option<&[u64]> {
-        let c = code as usize;
-        if c < self.n_codes {
-            Some(&self.words[c * self.stride..(c + 1) * self.stride])
-        } else {
-            None
-        }
+    pub fn row(&self, code: u32) -> &[u64] {
+        let c = (code as usize).min(self.n_codes);
+        &self.words[c * self.stride..(c + 1) * self.stride]
     }
 }
 
 /// Tests bit `i` of a `MatchBits` row.
 #[inline]
-pub fn match_bit(row: Option<&[u64]>, i: usize) -> bool {
-    match row {
-        Some(r) => (r[i >> 6] >> (i & 63)) & 1 != 0,
-        None => false,
-    }
+pub fn match_bit(row: &[u64], i: usize) -> bool {
+    (row[i >> 6] >> (i & 63)) & 1 != 0
 }
 
 impl ClusterCoding {

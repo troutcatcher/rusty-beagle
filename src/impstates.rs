@@ -8,22 +8,17 @@ const NIL: i32 = -103;
 
 /// Packs per-state match booleans into a bitset row (whole-word writes, so
 /// no prior clearing is needed; bits at or above `haps.len()` are zero).
+///
+/// One word is built per 64 states, which keeps the accumulate branchless
+/// and the store out of the inner loop.
 #[inline]
 fn fill_match_bits<F: Fn(usize) -> bool>(haps: &[i32], out: &mut [u64], is_match: F) {
-    let mut w = 0u64;
-    let mut word_idx = 0;
-    for (j, &hap) in haps.iter().enumerate() {
-        if is_match(hap as usize) {
-            w |= 1u64 << (j & 63);
+    for (word, chunk) in out.iter_mut().zip(haps.chunks(64)) {
+        let mut w = 0u64;
+        for (k, &hap) in chunk.iter().enumerate() {
+            w |= (is_match(hap as usize) as u64) << k;
         }
-        if j & 63 == 63 {
-            out[word_idx] = w;
-            word_idx += 1;
-            w = 0;
-        }
-    }
-    if !haps.is_empty() && haps.len() & 63 != 0 {
-        out[word_idx] = w;
+        *word = w;
     }
 }
 
@@ -227,28 +222,26 @@ impl ImpStates {
                         }
                     }
                     self.dirty.clear();
-                    let cache_seq = &self.cache_seq;
+                    let cache_seq = &self.cache_seq[..n_comp_haps];
                     let row_bits = match_bits.row(targ_allele);
-                    let mut w = 0u64;
-                    let mut word_idx = 0;
-                    for j in 0..n_comp_haps {
-                        let h = haps[j] as usize;
-                        let is_match = if h < n_ref {
-                            crate::impdata::match_bit(row_bits, cache_seq[j] as usize)
-                        } else {
-                            targ[h - n_ref] == targ_allele
-                        };
-                        if is_match {
-                            w |= 1u64 << (j & 63);
+                    for ((word, hap_chunk), seq_chunk) in match_out
+                        .iter_mut()
+                        .zip(haps.chunks(64))
+                        .zip(cache_seq.chunks(64))
+                    {
+                        let mut w = 0u64;
+                        for (k, (&hap, &seq)) in
+                            hap_chunk.iter().zip(seq_chunk.iter()).enumerate()
+                        {
+                            let h = hap as usize;
+                            let is_match = if h < n_ref {
+                                crate::impdata::match_bit(row_bits, seq as usize)
+                            } else {
+                                targ[h - n_ref] == targ_allele
+                            };
+                            w |= (is_match as u64) << k;
                         }
-                        if j & 63 == 63 {
-                            match_out[word_idx] = w;
-                            word_idx += 1;
-                            w = 0;
-                        }
-                    }
-                    if n_comp_haps & 63 != 0 {
-                        match_out[word_idx] = w;
+                        *word = w;
                     }
                 }
                 crate::impdata::ClusterCoding::Direct {
