@@ -5,7 +5,34 @@ use crate::phasedata::{EstPhase, Steps};
 use crate::xref::XRefGT;
 use rayon::prelude::*;
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
+
+/// Multiplicative hasher for the `i32` sequence keys. The keys are already
+/// `BitArray` range hashes, so they need no further mixing; the default
+/// SipHash costs more than the map lookup it protects, and this map is
+/// private to one step of one batch, never exposed to untrusted input.
+#[derive(Default)]
+struct IntHasher(u64);
+
+impl Hasher for IntHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 ^ b as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+    }
+    #[inline]
+    fn write_i32(&mut self, i: i32) {
+        self.0 = (i as u32 as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+type IntMap<K, V> = HashMap<K, V, BuildHasherDefault<IntHasher>>;
 
 pub struct CodedSteps {
     pub all_haps: Arc<XRefGT>,
@@ -66,7 +93,7 @@ fn coded_steps_batch(
     let n_haps = gt.n_haps();
     let mut hap_to_seq: Vec<Vec<u32>> = vec![vec![0u32; n_haps]; n_steps];
     let mut seq_cnt = vec![0u32; n_steps];
-    let mut seq_map: Vec<HashMap<i32, u32>> = (0..n_steps).map(|_| HashMap::new()).collect();
+    let mut seq_map: Vec<IntMap<i32, u32>> = (0..n_steps).map(|_| IntMap::default()).collect();
     for h in 0..n_haps {
         let mut m_start = steps.start(start_step);
         for j in 0..n_steps {
