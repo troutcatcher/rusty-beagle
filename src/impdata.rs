@@ -16,6 +16,7 @@ pub enum ClusterCoding {
     /// all cluster markers share one sequence-coded block:
     /// ref hap h -> seq1_to_seq2[hap2seq[h]]
     Composed {
+        block: u32,
         hap2seq: Arc<Vec<u16>>,
         seq1_to_seq2: Vec<u32>,
         targ: Vec<u32>,
@@ -67,6 +68,7 @@ impl ClusterCoding {
 }
 
 /// Port of `imp.ImpData`.
+#[allow(dead_code)] // parity fields kept for the phasing port
 pub struct ImpData {
     pub imp_states: usize,
     pub imp_step: f32,
@@ -195,10 +197,12 @@ impl ImpData {
         self.hap_to_seq[cluster].get(hap, self.n_ref_haps)
     }
 
+    #[allow(dead_code)]
     pub fn targ_cluster_start(&self, cluster: usize) -> usize {
         self.targ_clust_start_end[cluster]
     }
 
+    #[allow(dead_code)]
     pub fn targ_cluster_end(&self, cluster: usize) -> usize {
         self.targ_clust_start_end[cluster + 1]
     }
@@ -379,7 +383,7 @@ fn code_cluster(
     let value_size = seq_cnt;
 
     match hap_coded_block {
-        Some(_) => {
+        Some(block_id) => {
             // codeSeqCodedRef: compose through the block's seq alphabet
             let (block_hap2seq, first_seq2allele) = match &restrict_ref[start].alleles {
                 RefAlleles::SeqCoded {
@@ -406,6 +410,7 @@ fn code_cluster(
                 }
             }
             ClusterCoding::Composed {
+                block: block_id,
                 hap2seq: block_hap2seq,
                 seq1_to_seq2,
                 targ: coded_targ,

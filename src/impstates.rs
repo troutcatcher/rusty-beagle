@@ -6,6 +6,27 @@ use crate::javautil::{IntIntMap, JavaOrd, JavaPriorityQueue, JavaRandom};
 
 const NIL: i32 = -103;
 
+/// Packs per-state match booleans into a bitset row (whole-word writes, so
+/// no prior clearing is needed; bits at or above `haps.len()` are zero).
+#[inline]
+fn fill_match_bits<F: Fn(usize) -> bool>(haps: &[i32], out: &mut [u64], is_match: F) {
+    let mut w = 0u64;
+    let mut word_idx = 0;
+    for (j, &hap) in haps.iter().enumerate() {
+        if is_match(hap as usize) {
+            w |= 1u64 << (j & 63);
+        }
+        if j & 63 == 63 {
+            out[word_idx] = w;
+            word_idx += 1;
+            w = 0;
+        }
+    }
+    if !haps.is_empty() && haps.len() & 63 != 0 {
+        out[word_idx] = w;
+    }
+}
+
 /// Port of `beagleutil.CompHapSegment` (ordered by `lastIbsStep` only; ties
 /// are resolved by the priority-queue's heap layout, replicated in
 /// `JavaPriorityQueue`).
@@ -35,6 +56,8 @@ pub struct ImpStates {
     comp_hap_to_list_index: Vec<usize>,
     comp_hap_to_hap: Vec<i32>,
     comp_hap_to_end: Vec<i32>,
+    cache_seq: Vec<u16>,
+    dirty: Vec<u32>,
 }
 
 impl ImpStates {
@@ -50,19 +73,25 @@ impl ImpStates {
             comp_hap_to_list_index: vec![0; max_states],
             comp_hap_to_hap: vec![0; max_states],
             comp_hap_to_end: vec![0; max_states],
+            cache_seq: vec![0; max_states],
+            dirty: Vec::new(),
         }
     }
 
-    /// `ImpStates.ibsStates`: fills `hap_indices[m*max_states + j]` and
-    /// `al_match[m*max_states + j]`; returns the number of states.
+    /// `ImpStates.ibsStates`: fills the allele-match bitset
+    /// (`al_match[m*words_per_row + (j>>6)]` bit `j&63`); returns the number
+    /// of states.  Per-state haplotype indices are re-derived afterwards via
+    /// `replay` (this avoids materializing the nClusters x maxStates
+    /// haplotype matrix that Java builds).
     pub fn ibs_states(
         &mut self,
         imp_data: &ImpData,
         ibs_haps: &ImpIbs,
         targ_hap: usize,
-        hap_indices: &mut [i32],
-        al_match: &mut [bool],
+        al_match: &mut [u64],
+        words_per_row: usize,
     ) -> usize {
+        let t0 = std::time::Instant::now();
         self.initialize_fields();
         let n_steps = ibs_haps.coded_steps.n_steps();
         for j in 0..n_steps {
@@ -75,7 +104,8 @@ impl ImpStates {
         if self.q.is_empty() {
             self.fill_q_with_random_haps(imp_data, targ_hap);
         }
-        self.copy_data(imp_data, targ_hap, hap_indices, al_match)
+        crate::hmm::phase_add(4, t0.elapsed().as_nanos() as u64);
+        self.copy_data(imp_data, targ_hap, al_match, words_per_row)
     }
 
     fn initialize_fields(&mut self) {
@@ -138,12 +168,11 @@ impl ImpStates {
         &mut self,
         imp_data: &ImpData,
         targ_hap: usize,
-        hap_indices: &mut [i32],
-        al_match: &mut [bool],
+        al_match: &mut [u64],
+        words_per_row: usize,
     ) -> usize {
         let n_comp_haps = self.q.len();
         let shifted_targ_hap = imp_data.n_ref_haps + targ_hap;
-        let max_states = self.max_states;
         // initializeCopy
         for j in 0..n_comp_haps {
             self.comp_hap_end[j].push(self.n_clusters as i32); // add missing end of last segment
@@ -152,9 +181,105 @@ impl ImpStates {
             self.comp_hap_to_end[j] = self.comp_hap_end[j][0];
         }
         let n_ref = imp_data.n_ref_haps;
+        // Per-state cache of the seq-coded block sequence index
+        // (hap2seq[state hap]): valid while the state's haplotype and the
+        // cluster's block are unchanged.  This avoids the random-access
+        // hap2seq lookup for every (cluster, state) pair.
+        let mut cache_block: i64 = -1;
+        if self.cache_seq.len() < n_comp_haps {
+            self.cache_seq.resize(n_comp_haps, 0);
+        }
+        self.dirty.clear();
         for m in 0..self.n_clusters {
             let targ_allele = imp_data.allele(m, shifted_targ_hap);
-            let row = m * max_states;
+            let row = m * words_per_row;
+            let m_i32 = m as i32;
+            for j in 0..n_comp_haps {
+                if m_i32 == self.comp_hap_to_end[j] {
+                    self.comp_hap_to_list_index[j] += 1;
+                    self.comp_hap_to_hap[j] =
+                        self.comp_hap_hap[j][self.comp_hap_to_list_index[j]];
+                    self.comp_hap_to_end[j] =
+                        self.comp_hap_end[j][self.comp_hap_to_list_index[j]];
+                    self.dirty.push(j as u32);
+                }
+            }
+            let haps = &self.comp_hap_to_hap[..n_comp_haps];
+            let match_out = &mut al_match[row..row + words_per_row];
+            match &imp_data.hap_to_seq[m] {
+                crate::impdata::ClusterCoding::Composed {
+                    block,
+                    hap2seq,
+                    seq1_to_seq2,
+                    targ,
+                    ..
+                } => {
+                    if *block as i64 != cache_block {
+                        for j in 0..n_comp_haps {
+                            let h = haps[j] as usize;
+                            if h < n_ref {
+                                self.cache_seq[j] = hap2seq[h];
+                            }
+                        }
+                        cache_block = *block as i64;
+                    } else if !self.dirty.is_empty() {
+                        for &j in &self.dirty {
+                            let h = haps[j as usize] as usize;
+                            if h < n_ref {
+                                self.cache_seq[j as usize] = hap2seq[h];
+                            }
+                        }
+                    }
+                    self.dirty.clear();
+                    let cache_seq = &self.cache_seq;
+                    let mut w = 0u64;
+                    let mut word_idx = 0;
+                    for j in 0..n_comp_haps {
+                        let h = haps[j] as usize;
+                        let v = if h < n_ref {
+                            seq1_to_seq2[cache_seq[j] as usize]
+                        } else {
+                            targ[h - n_ref]
+                        };
+                        if v == targ_allele {
+                            w |= 1u64 << (j & 63);
+                        }
+                        if j & 63 == 63 {
+                            match_out[word_idx] = w;
+                            word_idx += 1;
+                            w = 0;
+                        }
+                    }
+                    if n_comp_haps & 63 != 0 {
+                        match_out[word_idx] = w;
+                    }
+                }
+                crate::impdata::ClusterCoding::Direct {
+                    coded_ref, targ, ..
+                } => {
+                    fill_match_bits(haps, match_out, |h| {
+                        let v = if h < n_ref {
+                            coded_ref[h]
+                        } else {
+                            targ[h - n_ref]
+                        };
+                        v == targ_allele
+                    });
+                }
+            }
+        }
+        n_comp_haps
+    }
+
+    /// Re-walks the composite-haplotype segments from the last `ibs_states`
+    /// call, handing the per-cluster state haplotypes to `f(m, haps)`.
+    pub fn replay<F: FnMut(usize, &[i32])>(&mut self, n_comp_haps: usize, mut f: F) {
+        for j in 0..n_comp_haps {
+            self.comp_hap_to_list_index[j] = 0;
+            self.comp_hap_to_hap[j] = self.comp_hap_hap[j][0];
+            self.comp_hap_to_end[j] = self.comp_hap_end[j][0];
+        }
+        for m in 0..self.n_clusters {
             let m_i32 = m as i32;
             for j in 0..n_comp_haps {
                 if m_i32 == self.comp_hap_to_end[j] {
@@ -165,46 +290,8 @@ impl ImpStates {
                         self.comp_hap_end[j][self.comp_hap_to_list_index[j]];
                 }
             }
-            let haps = &self.comp_hap_to_hap[..n_comp_haps];
-            let hap_out = &mut hap_indices[row..row + n_comp_haps];
-            let match_out = &mut al_match[row..row + n_comp_haps];
-            match &imp_data.hap_to_seq[m] {
-                crate::impdata::ClusterCoding::Composed {
-                    hap2seq,
-                    seq1_to_seq2,
-                    targ,
-                    ..
-                } => {
-                    for j in 0..n_comp_haps {
-                        let hap = haps[j];
-                        let h = hap as usize;
-                        let v = if h < n_ref {
-                            seq1_to_seq2[hap2seq[h] as usize]
-                        } else {
-                            targ[h - n_ref]
-                        };
-                        hap_out[j] = hap;
-                        match_out[j] = v == targ_allele;
-                    }
-                }
-                crate::impdata::ClusterCoding::Direct {
-                    coded_ref, targ, ..
-                } => {
-                    for j in 0..n_comp_haps {
-                        let hap = haps[j];
-                        let h = hap as usize;
-                        let v = if h < n_ref {
-                            coded_ref[h]
-                        } else {
-                            targ[h - n_ref]
-                        };
-                        hap_out[j] = hap;
-                        match_out[j] = v == targ_allele;
-                    }
-                }
-            }
+            f(m, &self.comp_hap_to_hap[..n_comp_haps]);
         }
-        n_comp_haps
     }
 
     fn fill_q_with_random_haps(&mut self, imp_data: &ImpData, targ_hap: usize) {

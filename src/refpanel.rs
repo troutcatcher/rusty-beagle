@@ -34,6 +34,7 @@ pub struct RefRec {
     pub n_haps: usize,
 }
 
+#[allow(dead_code)]
 impl RefRec {
     #[inline]
     pub fn is_allele_coded(&self) -> bool {
@@ -117,9 +118,14 @@ impl RefRec {
     }
 }
 
-/// Parses a reference VCF record: all genotypes must be phased and
-/// non-missing (`VcfRecGTParser.phasedAlleles`).
-pub fn parse_ref_rec(header: &VcfHeader, rec: &str) -> Result<(Marker, Vec<Vec<u32>>), String> {
+/// Parses a reference VCF record into per-haplotype alleles: all genotypes
+/// must be phased and non-missing (`VcfRecGTParser.phasedAlleles`).
+/// `alleles_buf` is a reusable buffer of length `2 * nSamples`.
+pub fn parse_ref_rec(
+    header: &VcfHeader,
+    rec: &str,
+    alleles_buf: &mut Vec<u8>,
+) -> Result<Marker, String> {
     let (marker, _) = Marker::parse(rec)?;
     let n_alleles = marker.n_alleles as i32;
     let bytes = rec.as_bytes();
@@ -130,23 +136,52 @@ pub fn parse_ref_rec(header: &VcfHeader, rec: &str) -> Result<(Marker, Vec<Vec<u
         )
     })?;
     let n_samples = header.samples.len();
-    let mut hap_lists: Vec<Vec<u32>> = vec![Vec::new(); n_alleles as usize];
+    alleles_buf.clear();
+    alleles_buf.resize(n_samples << 1, 0);
+    let no_sample_filter = header.n_unfiltered_samples == n_samples;
     let mut pos = ninth_tab;
     let mut unfilt: isize = -1;
     for s in 0..n_samples {
-        let next_unfiltered = header.unfiltered_index[s] as isize;
-        while unfilt + 1 < next_unfiltered {
+        if !no_sample_filter {
+            let next_unfiltered = header.unfiltered_index[s] as isize;
+            while unfilt + 1 < next_unfiltered {
+                unfilt += 1;
+                pos = match memchr_from(bytes, pos + 1, b'\t') {
+                    Some(p) => p,
+                    None => {
+                        return Err(format!("VCF data line has too few fields: {}", header.src))
+                    }
+                };
+            }
             unfilt += 1;
-            pos = match memchr_from(bytes, pos + 1, b'\t') {
-                Some(p) => p,
-                None => return Err(format!("VCF data line has too few fields: {}", header.src)),
-            };
         }
-        unfilt += 1;
         if pos >= bytes.len() {
             return Err(format!("VCF data line has too few fields: {}", header.src));
         }
         let al_start = pos + 1;
+        // fast path: single-digit phased diploid genotype "a|b" ending the field
+        if al_start + 3 <= bytes.len()
+            && bytes[al_start].is_ascii_digit()
+            && bytes[al_start + 1] == b'|'
+            && bytes[al_start + 2].is_ascii_digit()
+            && (al_start + 3 == bytes.len() || bytes[al_start + 3] == b'\t')
+            && header.samples.is_diploid[s]
+        {
+            let a1 = (bytes[al_start] - b'0') as i32;
+            let a2 = (bytes[al_start + 2] - b'0') as i32;
+            if a1 >= n_alleles || a2 >= n_alleles {
+                return Err(format!(
+                    "Invalid allele at marker [{}:{}]",
+                    marker.chrom(),
+                    marker.pos
+                ));
+            }
+            let h1 = s << 1;
+            alleles_buf[h1] = a1 as u8;
+            alleles_buf[h1 | 1] = a2 as u8;
+            pos = al_start + 3;
+            continue;
+        }
         let mut al_end1 = al_start;
         while al_end1 < bytes.len() {
             match bytes[al_end1] {
@@ -192,15 +227,15 @@ pub fn parse_ref_rec(header: &VcfHeader, rec: &str) -> Result<(Marker, Vec<Vec<u
                 marker.pos
             ));
         }
-        let h1 = (s << 1) as u32;
-        hap_lists[a1 as usize].push(h1);
-        hap_lists[a2 as usize].push(h1 | 1);
+        let h1 = s << 1;
+        alleles_buf[h1] = a1 as u8;
+        alleles_buf[h1 | 1] = a2 as u8;
         pos = match memchr_from(bytes, al_end2, b'\t') {
             Some(p) => p,
             None => bytes.len(),
         };
     }
-    Ok((marker, hap_lists))
+    Ok(marker)
 }
 
 #[inline]
@@ -248,17 +283,34 @@ fn parse_allele_strict(
     Ok(al)
 }
 
-/// hap-index lists → allele-coded record parts (major allele = maximal count,
-/// ties broken by smallest allele index; the major carrier list is dropped).
-pub fn to_allele_coded(mut hap_lists: Vec<Vec<u32>>) -> (u8, Vec<Vec<u32>>) {
+/// per-hap alleles → allele-coded record parts (major allele = maximal count,
+/// ties broken by smallest allele index; the major carrier list is empty).
+pub fn to_allele_coded(alleles: &[u8], n_alleles: usize) -> (u8, Vec<Vec<u32>>) {
+    let mut counts = vec![0u32; n_alleles];
+    for &a in alleles {
+        counts[a as usize] += 1;
+    }
     let mut major = 0usize;
-    for a in 1..hap_lists.len() {
-        if hap_lists[a].len() > hap_lists[major].len() {
+    for a in 1..n_alleles {
+        if counts[a] > counts[major] {
             major = a;
         }
     }
-    hap_lists[major] = Vec::new();
-    (major as u8, hap_lists)
+    let mut carriers: Vec<Vec<u32>> = (0..n_alleles)
+        .map(|a| {
+            if a == major {
+                Vec::new()
+            } else {
+                Vec::with_capacity(counts[a] as usize)
+            }
+        })
+        .collect();
+    for (h, &a) in alleles.iter().enumerate() {
+        if a as usize != major {
+            carriers[a as usize].push(h as u32);
+        }
+    }
+    (major as u8, carriers)
 }
 
 /// Port of `bref.SeqCoder3` restricted to what imputation needs:
@@ -535,6 +587,7 @@ impl RefReader {
         }
     }
 
+    #[allow(dead_code)]
     pub fn n_haps(&self) -> usize {
         self.n_haps
     }
@@ -584,13 +637,14 @@ impl RefReader {
             }
             let parsed: Vec<(Marker, u8, Vec<Vec<u32>>)> = batch
                 .par_iter()
-                .map(|line| {
-                    let (marker, hap_lists) =
-                        parse_ref_rec(&self.header, line).unwrap_or_else(|e| {
+                .map_init(Vec::new, |buf, line| {
+                    let marker =
+                        parse_ref_rec(&self.header, line, buf).unwrap_or_else(|e| {
                             eprintln!("ERROR: {}", e);
                             std::process::exit(1)
                         });
-                    let (major, carriers) = to_allele_coded(hap_lists);
+                    let (major, carriers) =
+                        to_allele_coded(buf, marker.n_alleles as usize);
                     (marker, major, carriers)
                 })
                 .collect();

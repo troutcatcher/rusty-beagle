@@ -272,14 +272,6 @@ pub fn java_rint(x: f64) -> f64 {
     x.round_ties_even()
 }
 
-/// `DecimalFormat("0.0000")` with HALF_EVEN rounding of an f64.
-/// Rust's `{:.4}` formatting rounds correctly (ties to even) from the exact
-/// binary value, matching Java's behavior on double values.
-#[inline]
-pub fn format_4dp(x: f64) -> String {
-    format!("{:.4}", x)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

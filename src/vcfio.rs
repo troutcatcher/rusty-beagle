@@ -5,7 +5,7 @@
 use crate::marker::Marker;
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::sync::Arc;
 
 /// Opens a possibly-gzipped (including BGZF) text file for line reading.
@@ -15,11 +15,16 @@ pub fn open_text(path: &str) -> Box<dyn BufRead + Send> {
         std::process::exit(1)
     });
     let mut reader = BufReader::with_capacity(1 << 20, f);
-    let is_gz = {
+    let (is_gz, is_bgzf) = {
         let buf = reader.fill_buf().unwrap_or(&[]);
-        buf.len() >= 2 && buf[0] == 0x1f && buf[1] == 0x8b
+        let gz = buf.len() >= 2 && buf[0] == 0x1f && buf[1] == 0x8b;
+        (gz, gz && crate::bgzf::sniff_bgzf(buf))
     };
-    if is_gz {
+    if is_bgzf {
+        // BGZF: decompress blocks in parallel (like Java's BGZipIt)
+        let bgzf = crate::bgzf::ParallelBgzfReader::new(reader);
+        Box::new(BufReader::with_capacity(1 << 20, bgzf))
+    } else if is_gz {
         let gz = flate2::bufread::MultiGzDecoder::new(reader);
         Box::new(BufReader::with_capacity(1 << 20, gz))
     } else {
@@ -419,19 +424,4 @@ impl LineSource {
             }
         }
     }
-}
-
-/// Reads a full ID set for marker exclusion filtering: a marker is excluded
-/// if its ID or its "chrom:pos" string is in the exclusion set (Beagle's
-/// `FilterUtil.markerFilter` excludes by the VCF ID field).
-pub fn marker_excluded(marker: &Marker, excluded: &HashSet<String>) -> bool {
-    if excluded.is_empty() {
-        return false;
-    }
-    if let Some(id) = &marker.id {
-        if excluded.contains(id.as_ref()) {
-            return true;
-        }
-    }
-    false
 }

@@ -76,6 +76,7 @@ pub struct Window {
 }
 
 impl Window {
+    #[allow(dead_code)]
     pub fn chrom_index(&self) -> u16 {
         self.targ_recs[0].marker.chrom_idx
     }
@@ -157,6 +158,7 @@ impl FilteredRefReader {
         FilteredRefReader { inner, chrom_int }
     }
 
+    #[allow(dead_code)]
     pub fn n_haps(&self) -> usize {
         self.inner.n_haps()
     }
@@ -241,6 +243,7 @@ impl SlidingWindows {
         }
     }
 
+    #[allow(dead_code)]
     pub fn targ_samples(&self) -> crate::vcfio::Samples {
         self.targ_it.header.samples.clone()
     }

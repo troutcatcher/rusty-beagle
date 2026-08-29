@@ -31,7 +31,6 @@ impl Fmt {
 
 /// Port of `imp.RefHapHash`.
 struct RefHapHash<'a> {
-    targ_cluster: usize,
     ref_recs: &'a [Arc<RefRec>],
     i2hap: Vec<i32>,
     i2hash: Vec<i32>,
@@ -59,8 +58,8 @@ impl<'a> RefHapHash<'a> {
         list.dedup();
         let i2hap = list;
         let n = i2hap.len();
+        let _ = targ_cluster;
         let mut hash = RefHapHash {
-            targ_cluster,
             ref_recs,
             i2hash: vec![0; n],
             alt_alleles: vec![Vec::new(); n],
@@ -640,6 +639,7 @@ fn set_to_obs_alleles(
 }
 
 /// Port of `main.WindowWriter`.
+#[allow(dead_code)]
 pub struct WindowWriter {
     file: File,
     samples: Samples,

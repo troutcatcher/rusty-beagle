@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::process::exit;
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)] // phasing parameters accepted for CLI compatibility
 pub struct Par {
     // data parameters
     pub gt: String,
@@ -93,8 +94,6 @@ impl ChromInterval {
         self.chrom == chrom && pos >= self.start && (self.end == i32::MAX || pos <= self.end)
     }
 }
-
-pub const PROGRAM: &str = "rusty-beagle 0.1.0 (port of beagle 27Feb25.75f)";
 
 pub fn usage() -> String {
     format!(

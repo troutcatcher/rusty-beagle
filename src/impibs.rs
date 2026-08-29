@@ -122,6 +122,7 @@ fn code_step(imp_data: &ImpData, starts: &[usize], start_index: usize) -> (Packe
 }
 
 /// Port of `imp.ImpIbs`.
+#[allow(dead_code)]
 pub struct ImpIbs {
     pub coded_steps: CodedSteps,
     n_ref_haps: usize,
@@ -170,6 +171,7 @@ impl ImpIbs {
         &self.ibs_haps[step][hap]
     }
 
+    #[allow(dead_code)]
     pub fn n_haps_per_step(&self) -> usize {
         self.n_haps_per_step
     }
