@@ -46,6 +46,10 @@ struct Baum {
     fwd_val: Vec<f32>,       // n_markers x max_states
     bwd_val: Vec<f32>,       // max_states
     max_states: usize,
+    /// number of retained states in the previous haplotype's `StateProbs`;
+    /// sparsity is similar between haplotypes, so this preallocates the CSR
+    /// arrays instead of growing them by repeated doubling
+    size_hint: usize,
 }
 
 impl Baum {
@@ -61,6 +65,7 @@ impl Baum {
             fwd_val: vec![0.0; n_markers * max_states],
             bwd_val: vec![0.0; max_states],
             max_states,
+            size_hint: 0,
         }
     }
 
@@ -104,21 +109,30 @@ impl Baum {
             let row = m * self.max_states;
             let bits = &self.alleles_match[m * self.words_per_row..];
             if m == 0 {
-                for j in 0..n_states {
-                    let is_match = (bits[j >> 6] >> (j & 63)) & 1 != 0;
-                    let em = if is_match { p_no_err } else { p_err };
-                    self.fwd_val[row + j] = em;
+                let cur = &mut self.fwd_val[row..row + n_states];
+                let mut word = 0u64;
+                for (j, c) in cur.iter_mut().enumerate() {
+                    if j & 63 == 0 {
+                        word = bits[j >> 6];
+                    }
+                    let em = if word & 1 != 0 { p_no_err } else { p_err };
+                    word >>= 1;
+                    *c = em;
                     sum += em;
                 }
             } else {
                 let (prev_rows, cur_rows) = self.fwd_val.split_at_mut(row);
                 let prev = &prev_rows[row - self.max_states..];
                 let cur = &mut cur_rows[..n_states];
-                for j in 0..n_states {
-                    let is_match = (bits[j >> 6] >> (j & 63)) & 1 != 0;
-                    let em = if is_match { p_no_err } else { p_err };
-                    let v = em * (scale * prev[j] + shift);
-                    cur[j] = v;
+                let mut word = 0u64;
+                for (j, (c, &p)) in cur.iter_mut().zip(prev.iter()).enumerate() {
+                    if j & 63 == 0 {
+                        word = bits[j >> 6];
+                    }
+                    let em = if word & 1 != 0 { p_no_err } else { p_err };
+                    word >>= 1;
+                    let v = em * (scale * p + shift);
+                    *c = v;
                     sum += v;
                 }
             }
@@ -149,16 +163,20 @@ impl Baum {
         let bits = &self.alleles_match[m * self.words_per_row..];
         let fwd = &mut self.fwd_val[row..row + n_states];
         let bwd = &mut self.bwd_val[..n_states];
-        for j in 0..n_states {
-            let b = scale * bwd[j] + shift; // finish calculating bwd value
-            let f = fwd[j] * b; // store state probabilities in fwd_val[m]
-            fwd[j] = f;
+        let mut word = 0u64;
+        for (j, (f_slot, b_slot)) in fwd.iter_mut().zip(bwd.iter_mut()).enumerate() {
+            let b = scale * *b_slot + shift; // finish calculating bwd value
+            let f = *f_slot * b; // store state probabilities in fwd_val[m]
+            *f_slot = f;
             state_sum += f;
 
-            let is_match = (bits[j >> 6] >> (j & 63)) & 1 != 0;
-            let em = if is_match { p_no_err } else { p_err };
+            if j & 63 == 0 {
+                word = bits[j >> 6];
+            }
+            let em = if word & 1 != 0 { p_no_err } else { p_err };
+            word >>= 1;
             let b2 = b * em;
-            bwd[j] = b2;
+            *b_slot = b2;
             bwd_val_sum += b2;
         }
         for f in fwd.iter_mut() {
@@ -176,9 +194,10 @@ impl Baum {
         let n_markers_m1 = n_markers - 1;
         let threshold = (0.005f32).min(0.9999f32 / n_states as f32);
         let mut offsets: Vec<u32> = Vec::with_capacity(n_markers + 1);
-        let mut haps: Vec<i32> = Vec::new();
-        let mut probs: Vec<f32> = Vec::new();
-        let mut probs_p1: Vec<f32> = Vec::new();
+        let cap = self.size_hint;
+        let mut haps: Vec<i32> = Vec::with_capacity(cap);
+        let mut probs: Vec<f32> = Vec::with_capacity(cap);
+        let mut probs_p1: Vec<f32> = Vec::with_capacity(cap);
         offsets.push(0);
         let fwd_val = &self.fwd_val;
         let max_states = self.max_states;
@@ -198,6 +217,7 @@ impl Baum {
             }
             offsets.push(haps.len() as u32);
         });
+        self.size_hint = haps.len();
         StateProbs {
             offsets,
             haps,

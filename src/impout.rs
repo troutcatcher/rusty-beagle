@@ -30,11 +30,19 @@ impl Fmt {
 }
 
 /// Port of `imp.RefHapHash`.
+///
+/// The per-haplotype ALT-allele lists are held in one flat CSR buffer rather
+/// than a `Vec<Vec<_>>`: this is rebuilt for every marker cluster, and a
+/// separate growing `Vec` per haplotype cost thousands of allocations per
+/// cluster.
 struct RefHapHash<'a> {
     ref_recs: &'a [Arc<RefRec>],
     i2hap: Vec<i32>,
     i2hash: Vec<i32>,
-    alt_alleles: Vec<Vec<i32>>, // (marker offset, ALT allele) pairs
+    /// `alt_data[alt_start[i]..alt_start[i + 1]]` = (marker offset, ALT
+    /// allele) for haplotype `i`
+    alt_start: Vec<u32>,
+    alt_data: Vec<(u32, u32)>,
     start: usize,
     end: usize,
 }
@@ -62,7 +70,8 @@ impl<'a> RefHapHash<'a> {
         let mut hash = RefHapHash {
             ref_recs,
             i2hash: vec![0; n],
-            alt_alleles: vec![Vec::new(); n],
+            alt_start: Vec::new(),
+            alt_data: Vec::new(),
             i2hap,
             start,
             end,
@@ -73,65 +82,73 @@ impl<'a> RefHapHash<'a> {
 
     fn set_hash_and_alt_alleles(&mut self) {
         let mut rand = JavaRandom::new(self.start as i64);
+        let n = self.i2hap.len();
+        // (haplotype index, marker offset, ALT allele), later bucketed by
+        // haplotype into the CSR arrays
+        let mut staged: Vec<(u32, u32, u32)> = Vec::with_capacity(4 * n);
+        let mut counts = vec![0u32; n + 1];
+        let mut allele_hash: Vec<i32> = Vec::new();
         for m in self.start..self.end {
             let rec = &self.ref_recs[m];
-            let marker_offset = (m - self.start) as i32;
+            let marker_offset = (m - self.start) as u32;
             match &rec.alleles {
                 RefAlleles::AlleleCoded { major, carriers } if *major == 0 => {
-                    self.low_alt_freq_update(carriers, marker_offset, &mut rand);
+                    // low-ALT-frequency update: walk the (short) carrier lists
+                    let n_alleles = carriers.len();
+                    for al in 1..n_alleles {
+                        let hash = rand.next_int();
+                        let n_copies = carriers[al].len();
+                        if n < n_copies {
+                            for (i, &h) in self.i2hap.iter().enumerate() {
+                                if carriers[al].binary_search(&(h as u32)).is_ok() {
+                                    self.i2hash[i] = self.i2hash[i].wrapping_add(hash);
+                                    staged.push((i as u32, marker_offset, al as u32));
+                                    counts[i + 1] += 1;
+                                }
+                            }
+                        } else {
+                            for &hap in &carriers[al] {
+                                if let Ok(i) = self.i2hap.binary_search(&(hap as i32)) {
+                                    self.i2hash[i] = self.i2hash[i].wrapping_add(hash);
+                                    staged.push((i as u32, marker_offset, al as u32));
+                                    counts[i + 1] += 1;
+                                }
+                            }
+                        }
+                    }
                 }
                 _ => {
-                    self.standard_update(rec, marker_offset, &mut rand);
-                }
-            }
-        }
-    }
-
-    fn low_alt_freq_update(
-        &mut self,
-        carriers: &[Vec<u32>],
-        marker_offset: i32,
-        rand: &mut JavaRandom,
-    ) {
-        let n_alleles = carriers.len();
-        for al in 1..n_alleles {
-            let hash = rand.next_int();
-            let n_copies = carriers[al].len();
-            if self.i2hap.len() < n_copies {
-                for i in 0..self.i2hap.len() {
-                    let hap = self.i2hap[i] as u32;
-                    if carriers[al].binary_search(&hap).is_ok() {
-                        self.i2hash[i] = self.i2hash[i].wrapping_add(hash);
-                        self.alt_alleles[i].push(marker_offset);
-                        self.alt_alleles[i].push(al as i32);
+                    let n_alleles = rec.marker.n_alleles as usize;
+                    allele_hash.clear();
+                    allele_hash.push(0);
+                    for _ in 1..n_alleles {
+                        allele_hash.push(rand.next_int());
                     }
-                }
-            } else {
-                for &hap in &carriers[al] {
-                    if let Ok(i) = self.i2hap.binary_search(&(hap as i32)) {
-                        self.i2hash[i] = self.i2hash[i].wrapping_add(hash);
-                        self.alt_alleles[i].push(marker_offset);
-                        self.alt_alleles[i].push(al as i32);
+                    for (i, &h) in self.i2hap.iter().enumerate() {
+                        let allele = rec.allele(h as usize) as usize;
+                        if allele != 0 {
+                            self.i2hash[i] = self.i2hash[i].wrapping_add(allele_hash[allele]);
+                            staged.push((i as u32, marker_offset, allele as u32));
+                            counts[i + 1] += 1;
+                        }
                     }
                 }
             }
         }
-    }
-
-    fn standard_update(&mut self, rec: &RefRec, marker_offset: i32, rand: &mut JavaRandom) {
-        let n_alleles = rec.marker.n_alleles as usize;
-        let mut allele_hash = vec![0i32; n_alleles];
-        for a in allele_hash.iter_mut().skip(1) {
-            *a = rand.next_int();
+        // prefix-sum the per-haplotype counts, then scatter into CSR order
+        for i in 0..n {
+            counts[i + 1] += counts[i];
         }
-        for i in 0..self.i2hap.len() {
-            let allele = rec.allele(self.i2hap[i] as usize) as usize;
-            if allele != 0 {
-                self.i2hash[i] = self.i2hash[i].wrapping_add(allele_hash[allele]);
-                self.alt_alleles[i].push(marker_offset);
-                self.alt_alleles[i].push(allele as i32);
-            }
+        let total = counts[n] as usize;
+        let mut alt_data = vec![(0u32, 0u32); total];
+        let mut cursor = counts.clone();
+        for &(i, off, al) in &staged {
+            let slot = &mut cursor[i as usize];
+            alt_data[*slot as usize] = (off, al);
+            *slot += 1;
         }
+        self.alt_start = counts;
+        self.alt_data = alt_data;
     }
 
     #[inline]
@@ -147,11 +164,10 @@ impl<'a> RefHapHash<'a> {
     /// `RefHapHash.setAlleles`
     fn set_alleles(&self, index: usize, alleles: &mut [i32]) {
         alleles[..self.end - self.start].fill(0);
-        let il = &self.alt_alleles[index];
-        let mut j = 0;
-        while j < il.len() {
-            alleles[il[j] as usize] = il[j + 1];
-            j += 2;
+        let lo = self.alt_start[index] as usize;
+        let hi = self.alt_start[index + 1] as usize;
+        for &(off, al) in &self.alt_data[lo..hi] {
+            alleles[off as usize] = al as i32;
         }
     }
 }
@@ -456,7 +472,9 @@ fn append_records(
         return out;
     }
     let ref_recs = &window.ref_recs;
+    let tq0 = std::time::Instant::now();
     let rhh = RefHapHash::new(state_probs, targ_cluster, ref_recs, ref_start, ref_end);
+    out_add(2, tq0.elapsed().as_nanos() as u64);
     let n_markers = ref_end - ref_start;
     let mut rec_builders: Vec<ImputedRecBuilder> = (ref_start..ref_end)
         .map(|m| {
@@ -483,6 +501,7 @@ fn append_records(
     let mut h = 0;
     while h < n {
         let is_diploid = samples.is_diploid[h >> 1];
+        let tp0 = std::time::Instant::now();
         set_al_probs(
             imp_data,
             &state_probs[h],
@@ -505,6 +524,8 @@ fn append_records(
             &mut a2_probs,
             &mut scratch,
         );
+        out_add(3, tp0.elapsed().as_nanos() as u64);
+        let tb0 = std::time::Instant::now();
         if is_diploid {
             for m in 0..n_markers {
                 if !is_imputed[m] {
@@ -525,6 +546,7 @@ fn append_records(
                 a2_probs[m].fill(0.0);
             }
         }
+        out_add(4, tb0.elapsed().as_nanos() as u64);
         h += 2;
     }
     for (m, rb) in rec_builders.iter().enumerate() {
@@ -683,6 +705,7 @@ impl WindowWriter {
         let chunks: Vec<Vec<u8>> = (0..imp_data.n_clusters)
             .into_par_iter()
             .map(|c| {
+                let t0 = std::time::Instant::now();
                 let text = append_records(
                     imp_data,
                     window,
@@ -694,13 +717,27 @@ impl WindowWriter {
                     &self.fmt,
                     &self.hom_ref,
                 );
-                if text.is_empty() {
+                let t1 = std::time::Instant::now();
+                let out = if text.is_empty() {
                     Vec::new()
                 } else {
                     bgzf::compress(text.as_bytes())
-                }
+                };
+                out_add(0, (t1 - t0).as_nanos() as u64);
+                out_add(1, t1.elapsed().as_nanos() as u64);
+                out
             })
             .collect();
+        if std::env::var("RUSTY_BEAGLE_TIMING2").is_ok() {
+            eprintln!(
+                "[timing2/cpu-total] format: {:.3}s  deflate: {:.3}s  (hash: {:.3}s  alprobs: {:.3}s  build: {:.3}s)",
+                OUT_NANOS[0].load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9,
+                OUT_NANOS[1].load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9,
+                OUT_NANOS[2].load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9,
+                OUT_NANOS[3].load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9,
+                OUT_NANOS[4].load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9,
+            );
+        }
         for chunk in chunks {
             if !chunk.is_empty() {
                 self.file.write_all(&chunk).expect("write VCF records");
@@ -855,4 +892,17 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+static OUT_NANOS: [std::sync::atomic::AtomicU64; 5] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+#[inline]
+fn out_add(idx: usize, nanos: u64) {
+    OUT_NANOS[idx].fetch_add(nanos, std::sync::atomic::Ordering::Relaxed);
 }
