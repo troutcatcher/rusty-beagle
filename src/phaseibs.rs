@@ -139,11 +139,11 @@ fn bwd_ibs_haps(
     let mut out: Vec<Vec<i32>> = vec![Vec::new(); end_step - start_step];
     for j in (end_step..buffer_end_step).rev() {
         let (h2s, vs) = coded_steps.get(j);
-        pbwt.bwd_update(|h| h2s[h], *vs as usize, j as i32, &mut a, &mut d);
+        pbwt.bwd_update(|h| h2s.get(h), *vs as usize, j as i32, &mut a, &mut d);
     }
     for j in (start_step..end_step).rev() {
         let (h2s, vs) = coded_steps.get(j);
-        pbwt.bwd_update(|h| h2s[h], *vs as usize, j as i32, &mut a, &mut d);
+        pbwt.bwd_update(|h| h2s.get(h), *vs as usize, j as i32, &mut a, &mut d);
         out[j - start_step] = get_bwd_ibs_haps(pd, fpd, j, &a, &mut d, data);
     }
     out
@@ -166,11 +166,11 @@ fn fwd_ibs_haps(
     let mut out: Vec<Vec<i32>> = vec![Vec::new(); end_step - start_step];
     for j in buffer_start_step..start_step {
         let (h2s, vs) = coded_steps.get(j);
-        pbwt.fwd_update(|h| h2s[h], *vs as usize, j as i32, &mut a, &mut d);
+        pbwt.fwd_update(|h| h2s.get(h), *vs as usize, j as i32, &mut a, &mut d);
     }
     for j in start_step..end_step {
         let (h2s, vs) = coded_steps.get(j);
-        pbwt.fwd_update(|h| h2s[h], *vs as usize, j as i32, &mut a, &mut d);
+        pbwt.fwd_update(|h| h2s.get(h), *vs as usize, j as i32, &mut a, &mut d);
         out[j - start_step] = get_fwd_ibs_haps(pd, fpd, j, &a, &mut d, data);
     }
     out
@@ -355,11 +355,11 @@ fn lf_bwd_ibs_haps(
     let mut out: Vec<Vec<i32>> = vec![Vec::new(); end_step - start_step];
     for j in (end_step..buffer_end_step).rev() {
         let (h2s, vs) = coded_steps.get(j);
-        pbwt.bwd_update(|h| h2s[h], *vs as usize, j as i32, &mut a, &mut d);
+        pbwt.bwd_update(|h| h2s.get(h), *vs as usize, j as i32, &mut a, &mut d);
     }
     for j in (start_step..end_step).rev() {
         let (h2s, vs) = coded_steps.get(j);
-        pbwt.bwd_update(|h| h2s[h], *vs as usize, j as i32, &mut a, &mut d);
+        pbwt.bwd_update(|h| h2s.get(h), *vs as usize, j as i32, &mut a, &mut d);
         set_inv(&a, &mut a_inv);
         set_i_to_prev_next_i(fpd, j, &a_inv, &mut i_to_prev_i, &mut i_to_next_i);
         out[j - start_step] =
@@ -388,11 +388,11 @@ fn lf_fwd_ibs_haps(
     let mut out: Vec<Vec<i32>> = vec![Vec::new(); end_step - start_step];
     for j in buffer_start_step..start_step {
         let (h2s, vs) = coded_steps.get(j);
-        pbwt.fwd_update(|h| h2s[h], *vs as usize, j as i32, &mut a, &mut d);
+        pbwt.fwd_update(|h| h2s.get(h), *vs as usize, j as i32, &mut a, &mut d);
     }
     for j in start_step..end_step {
         let (h2s, vs) = coded_steps.get(j);
-        pbwt.fwd_update(|h| h2s[h], *vs as usize, j as i32, &mut a, &mut d);
+        pbwt.fwd_update(|h| h2s.get(h), *vs as usize, j as i32, &mut a, &mut d);
         set_inv(&a, &mut a_inv);
         set_i_to_prev_next_i(fpd, j, &a_inv, &mut i_to_prev_i, &mut i_to_next_i);
         out[j - start_step] =

@@ -14,7 +14,7 @@ pub enum PackedSeq {
 }
 
 impl PackedSeq {
-    fn new(vals: &[u32], value_size: u32) -> PackedSeq {
+    pub fn new(vals: &[u32], value_size: u32) -> PackedSeq {
         if value_size <= u8::MAX as u32 + 1 {
             PackedSeq::U8(vals.iter().map(|&v| v as u8).collect())
         } else if value_size <= u16::MAX as u32 + 1 {

@@ -1,6 +1,7 @@
 //! Port of `phase.CodedSteps`: indexes unique allele sequences within each
 //! step interval, over the combined (target-first, then reference) haplotypes.
 
+use crate::impibs::PackedSeq;
 use crate::phasedata::{EstPhase, Steps};
 use crate::xref::XRefGT;
 use rayon::prelude::*;
@@ -36,7 +37,12 @@ type IntMap<K, V> = HashMap<K, V, BuildHasherDefault<IntHasher>>;
 
 pub struct CodedSteps {
     pub all_haps: Arc<XRefGT>,
-    pub coded_steps: Vec<(Vec<u32>, u32)>, // (hap->seq, valueSize)
+    /// (hap->seq, valueSize). The PBWT reads these at permuted haplotype
+    /// positions, so the table is a random access per haplotype per step;
+    /// narrowing it to the smallest width the sequence count allows keeps
+    /// more of it in cache (a 400,000-haplotype reference is 1.6 MB as u32,
+    /// 0.4 MB as u8).
+    pub coded_steps: Vec<(PackedSeq, u32)>,
 }
 
 #[allow(dead_code)]
@@ -58,7 +64,7 @@ impl CodedSteps {
     }
 
     #[inline]
-    pub fn get(&self, step: usize) -> &(Vec<u32>, u32) {
+    pub fn get(&self, step: usize) -> &(PackedSeq, u32) {
         &self.coded_steps[step]
     }
 
@@ -67,7 +73,7 @@ impl CodedSteps {
     }
 }
 
-fn coded_steps(gt: &XRefGT, steps: &Steps, n_threads: usize) -> Vec<(Vec<u32>, u32)> {
+fn coded_steps(gt: &XRefGT, steps: &Steps, n_threads: usize) -> Vec<(PackedSeq, u32)> {
     let max_steps_per_batch = 512usize;
     let mut n_steps_per_batch = (steps.size() + n_threads - 1) / n_threads;
     while n_steps_per_batch > max_steps_per_batch {
@@ -86,7 +92,7 @@ fn coded_steps_batch(
     steps: &Steps,
     batch: usize,
     batch_size: usize,
-) -> Vec<(Vec<u32>, u32)> {
+) -> Vec<(PackedSeq, u32)> {
     let start_step = batch * batch_size;
     let end_step = (start_step + batch_size).min(steps.size());
     let n_steps = end_step - start_step;
@@ -115,6 +121,6 @@ fn coded_steps_batch(
     hap_to_seq
         .into_iter()
         .zip(seq_cnt)
-        .map(|(v, c)| (v, c))
+        .map(|(v, c)| (PackedSeq::new(&v, c), c))
         .collect()
 }
