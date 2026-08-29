@@ -169,6 +169,33 @@ bref3-specific notes:
   permutation table is cross-checked by unit test against a direct port of
   `Bref3Reader.snvPerms()`'s recursive generator.
 
+## Deliberate structural deviations from Java
+
+These change how the work is organized, never which values are produced;
+every one is covered by the byte-identical parity suites.
+
+- `ImpStates` does not materialize Java's `nClusters x maxStates` matrix of
+  state haplotypes.  `copyData` fills the allele-match bitset directly, and
+  the per-cluster state haplotypes are re-derived afterwards by `replay`.
+- Both of those walks precompute the composite-haplotype segment switches
+  into one cluster-sorted transition list, rather than testing every state's
+  current segment end at every cluster.  Java advances a composite haplotype
+  at most once per cluster and only on its current segment end, so a segment
+  end that is not strictly past the previous transition can never fire and
+  pins that composite haplotype for the rest of the window; `build_events`
+  reproduces that rule exactly.
+- `ClusterCoding` additionally stores its code array transposed into one
+  bitset per allele-sequence index (`MatchBits`).  The HMM inner loop only
+  asks whether a state carries the target's sequence, so it reads one bit
+  from an L1-sized row instead of gathering a `u32` from the full
+  per-haplotype code array.
+- `RefHapHash` keeps its per-haplotype ALT-allele lists in one flat CSR
+  buffer instead of a list per haplotype, and resolves `hap2seq` once per
+  sequence-coded block rather than once per marker.
+- `StateProbs` preallocates its CSR arrays from the previous haplotype's
+  size; `LineSource` reads batches into one reused byte buffer and runs on
+  its own thread so decompression overlaps with parsing and sequence-coding.
+
 ## Validation
 
 `tests/` contains a harness that generates synthetic phased ref/target panels,

@@ -7,8 +7,8 @@ genotype phasing and imputation (upstream release `beagle.250227` /
 rusty-beagle produces **bit-identical output** to Java Beagle for
 reference-based phasing and imputation — every phased GT, DS, GP/AP value and
 every DR2/AF INFO field matches, byte for byte (only the `##filedate`/`##source`
-header lines differ) — while running **1.4–2.9× faster** and using about
-**2–3× less memory**.
+header lines differ) — while running **2–4× faster** and using about
+**2.5–3× less memory**.
 
 ```
 rusty-beagle gt=target.vcf.gz ref=reference.vcf.gz out=imputed map=plink.chr20.map nthreads=8
@@ -110,41 +110,56 @@ Imputation of an already-phased target:
 
 | workload | Java Beagle 5.5 | rusty-beagle | speedup |
 |---|---|---|---|
-| 2,000 ref / 100 targ samples, 20k markers, 1 window | 7.7 s | 3.5 s | 2.2× |
-| same, 12 windows (`window=4 overlap=2`) | 6.3 s | 2.2 s | 2.9× |
-| 5,000 ref / 200 targ samples, 50k markers | 26.3 s | 15.5 s | 1.7× |
-| peak RSS (5,000-sample run) | 1.32 GB | 0.64 GB | 2.1× less |
+| 2,000 ref / 100 targ samples, 20k markers, 1 window | 6.4 s | 2.0 s | 3.2× |
+| same, 12 windows (`window=4 overlap=2`) | 4.8 s | 1.5 s | 3.2× |
+| 5,000 ref / 200 targ samples, 50k markers | 24.5 s | 8.8 s | 2.8× |
+| peak RSS (5,000-sample run) | 1.90 GB | 0.70 GB | 2.7× less |
 
 Phasing + imputation of an unphased target (same panels, ~5% of reference
 markers genotyped in the target):
 
 | workload | Java Beagle 5.5 | rusty-beagle | speedup |
 |---|---|---|---|
-| 2,000 ref / 100 targ samples, 20k markers | 12.8 s | 7.0 s | 1.8× |
-| 5,000 ref / 200 targ samples, 50k markers | 43.4 s | 30.2 s | 1.4× |
-| peak RSS (2,000-sample run) | 0.71 GB | 0.24 GB | 2.9× less |
-| peak RSS (5,000-sample run) | 1.35 GB | 0.67 GB | 2.0× less |
+| 2,000 ref / 100 targ samples, 20k markers | 10.4 s | 4.4 s | 2.4× |
+| 5,000 ref / 200 targ samples, 50k markers | 36.4 s | 18.8 s | 1.9× |
+| peak RSS (2,000-sample run) | 0.66 GB | 0.24 GB | 2.8× less |
+| peak RSS (5,000-sample run) | 1.58 GB | 0.68 GB | 2.3× less |
 
 Imputation of a phased target from a `.bref3` reference panel (same panels,
 converted with the `bref3` tool at its default block size) is faster still,
-since there's no gzip decompression or VCF text parsing to do:
+since there is no gzip decompression or VCF text parsing to do:
 
 | workload | Java Beagle 5.5 | rusty-beagle | speedup |
 |---|---|---|---|
-| 2,000 ref / 100 targ samples, 20k markers | 6.8 s | 3.2 s | 2.1× |
-| 5,000 ref / 200 targ samples, 50k markers | 21.6 s | 13.0 s | 1.7× |
-| peak RSS (2,000-sample run) | 0.80 GB | 0.23 GB | 3.5× less |
-| peak RSS (5,000-sample run) | 1.52 GB | 0.64 GB | 2.4× less |
+| 2,000 ref / 100 targ samples, 20k markers | 5.9 s | 1.5 s | 3.9× |
+| 5,000 ref / 200 targ samples, 50k markers | 20.8 s | 6.6 s | 3.2× |
+| peak RSS (5,000-sample run) | 1.58 GB | 0.66 GB | 2.4× less |
 
 Speed comes from the same parallel structure as Java (per-haplotype HMM,
 per-sample phasing, per-cluster output, parallel input parsing) plus
-Rust-side wins: no JVM warmup/GC, parallel BGZF inflation, flat
-cache-friendly buffers, a bitset for allele matches, `Arc`-shared reference
-haplotypes across phasing iterations, and zlib-rs for (de)compression.
-Building with `RUSTFLAGS="-C target-cpu=native"` shaves off a further ~5–8%.
-The phasing headroom is smaller than imputation's because most of the
-phasing stage is spent in the `PhaseBaum2` forward/backward passes, whose
-f32 evaluation order is pinned by bit-parity with Java.
+Rust-side wins: no JVM warmup/GC, parallel BGZF inflation, and zlib-rs for
+(de)compression. Most of the rest is layout and allocation work in the hot
+loops rather than anything algorithmic, since the arithmetic order is pinned
+by bit-parity with Java:
+
+- VCF lines are read in batches into one reused buffer, and line reading runs
+  on its own thread so gunzip overlaps with parsing and sequence-coding
+- composite-haplotype segment switches are precomputed into a cluster-sorted
+  transition list, instead of rescanning all states at every cluster
+- the per-cluster allele-match bitset is built one 64-bit word at a time with
+  a branchless shift, and reads a precomputed match bitset (~1 KB, L1-sized)
+  rather than gathering from the full per-haplotype code array
+- per-haplotype ALT-allele lists and state probabilities use flat CSR buffers
+  with reused capacity instead of `Vec<Vec<_>>` rebuilt per cluster
+
+Phasing gains less than imputation because most of its time goes to the
+`PhaseBaum2` forward/backward passes, which are float arithmetic in a fixed
+evaluation order rather than the layout-bound loops above.
+
+`RUSTFLAGS="-C target-cpu=native"` is not recommended: on the benchmark
+machine it came out marginally *slower* than the portable build once the hot
+loops were branchless (output is identical either way). Measure before
+adopting it.
 
 ## Build
 
