@@ -110,20 +110,20 @@ Imputation of an already-phased target:
 
 | workload | Java Beagle 5.5 | rusty-beagle | speedup |
 |---|---|---|---|
-| 2,000 ref / 100 targ samples, 20k markers, 1 window | 6.4 s | 2.0 s | 3.2× |
-| same, 12 windows (`window=4 overlap=2`) | 4.8 s | 1.5 s | 3.2× |
-| 5,000 ref / 200 targ samples, 50k markers | 24.5 s | 8.8 s | 2.8× |
-| peak RSS (5,000-sample run) | 1.90 GB | 0.70 GB | 2.7× less |
+| 2,000 ref / 100 targ samples, 20k markers, 1 window | 8.5 s | 2.4 s | 3.5× |
+| same, 12 windows (`window=4 overlap=2`) | 5.7 s | 1.7 s | 3.4× |
+| 5,000 ref / 200 targ samples, 50k markers | 27.4 s | 11.0 s | 2.5× |
+| peak RSS (5,000-sample run) | 1.70 GB | 0.66 GB | 2.6× less |
 
 Phasing + imputation of an unphased target (same panels, ~5% of reference
 markers genotyped in the target):
 
 | workload | Java Beagle 5.5 | rusty-beagle | speedup |
 |---|---|---|---|
-| 2,000 ref / 100 targ samples, 20k markers | 10.4 s | 4.4 s | 2.4× |
-| 5,000 ref / 200 targ samples, 50k markers | 36.4 s | 18.8 s | 1.9× |
-| peak RSS (2,000-sample run) | 0.66 GB | 0.24 GB | 2.8× less |
-| peak RSS (5,000-sample run) | 1.58 GB | 0.68 GB | 2.3× less |
+| 2,000 ref / 100 targ samples, 20k markers | 13.0 s | 5.9 s | 2.2× |
+| 5,000 ref / 200 targ samples, 50k markers | 41.8 s | 24.8 s | 1.7× |
+| peak RSS (2,000-sample run) | 0.74 GB | 0.22 GB | 3.4× less |
+| peak RSS (5,000-sample run) | 1.33 GB | 0.64 GB | 2.1× less |
 
 Imputation of a phased target from a `.bref3` reference panel (same panels,
 converted with the `bref3` tool at its default block size) is faster still,
@@ -131,9 +131,9 @@ since there is no gzip decompression or VCF text parsing to do:
 
 | workload | Java Beagle 5.5 | rusty-beagle | speedup |
 |---|---|---|---|
-| 2,000 ref / 100 targ samples, 20k markers | 5.9 s | 1.5 s | 3.9× |
-| 5,000 ref / 200 targ samples, 50k markers | 20.8 s | 6.6 s | 3.2× |
-| peak RSS (5,000-sample run) | 1.58 GB | 0.66 GB | 2.4× less |
+| 2,000 ref / 100 targ samples, 20k markers | 7.0 s | 1.7 s | 4.1× |
+| 5,000 ref / 200 targ samples, 50k markers | 22.2 s | 7.8 s | 2.8× |
+| peak RSS (5,000-sample run) | 1.35 GB | 0.62 GB | 2.2× less |
 
 A livestock-shaped panel — many animals, one chromosome, few SNPs — where
 the reference is a `.bref3` file of 200,000 animals genotyped at 1,300 SNPs
@@ -141,13 +141,13 @@ across a 158 Mb chromosome, and the target cohort carries every 10th SNP:
 
 | target cohort | Java Beagle 5.5 | rusty-beagle | speedup |
 |---|---|---|---|
-| 500 animals, imputation | 11.2 s | 1.9 s | 5.9× |
-| 500 animals, phasing + imputation | 21.2 s | 7.1 s | 3.0× |
-| 5,000 animals, imputation | 36.9 s | 12.6 s | 2.9× |
-| 5,000 animals, phasing + imputation | 50.9 s | 18.9 s | 2.7× |
-| 20,000 animals, imputation | 120.3 s | 52.6 s | 2.3× |
-| peak RSS (500-animal run) | 2.43 GB | 0.29 GB | 8.4× less |
-| peak RSS (20,000-animal run) | 10.48 GB | 5.23 GB | 2.0× less |
+| 500 animals, imputation | 9.0 s | 1.6 s | 5.6× |
+| 500 animals, phasing + imputation | 16.7 s | 6.8 s | 2.5× |
+| 5,000 animals, imputation | 32.5 s | 8.1 s | 4.0× |
+| 5,000 animals, phasing + imputation | 48.6 s | 14.9 s | 3.3× |
+| 20,000 animals, imputation | 125.3 s | 32.6 s | 3.8× |
+| peak RSS (500-animal run) | 2.18 GB | 0.26 GB | 8.3× less |
+| peak RSS (20,000-animal run) | 12.60 GB | 4.59 GB | 2.7× less |
 
 Peak memory in that regime is dominated by the retained per-haplotype HMM
 state probabilities, which both programs hold for every target haplotype at
@@ -169,7 +169,15 @@ by bit-parity with Java:
   a branchless shift, and reads a precomputed match bitset (~1 KB, L1-sized)
   rather than gathering from the full per-haplotype code array
 - per-haplotype ALT-allele lists and state probabilities use flat CSR buffers
-  with reused capacity instead of `Vec<Vec<_>>` rebuilt per cluster
+  instead of `Vec<Vec<_>>` rebuilt per cluster, with the retained states
+  interleaved so the values used together are read together
+- the backward pass records which states survive sparsification while their
+  probabilities are still in hand, so the retained rows are allocated once at
+  exactly their final size
+- a state's reference haplotype resolves to its table index through a direct
+  array rather than a binary search, and the table's haplotypes are deduped
+  with a bitset instead of sorting the full multiset (millions of entries per
+  cluster, tens of thousands distinct)
 
 Phasing gains less than imputation because most of its time goes to the
 `PhaseBaum2` forward/backward passes, which are float arithmetic in a fixed
