@@ -7,8 +7,8 @@ genotype phasing and imputation (upstream release `beagle.250227` /
 rusty-beagle produces **bit-identical output** to Java Beagle for
 reference-based phasing and imputation — every phased GT, DS, GP/AP value and
 every DR2/AF INFO field matches, byte for byte (only the `##filedate`/`##source`
-header lines differ) — while running **2–4× faster** and using about
-**2.5–3× less memory**.
+header lines differ) — while running **2–6× faster** and using **2–8× less
+memory**, depending on the shape of the panel.
 
 ```
 rusty-beagle gt=target.vcf.gz ref=reference.vcf.gz out=imputed map=plink.chr20.map nthreads=8
@@ -192,6 +192,10 @@ cargo test                     # unit tests (java.util.Random port, formats)
 ```
 python3 tests/gen_test_data.py --out-dir /tmp/t1
 bash tests/compare_beagle.sh /path/to/beagle.27Feb25.75f.jar /tmp/t1 nthreads=4
+
+# large-cohort panel (200k animals, one chromosome), then convert to bref3
+python3 tests/gen_large_cohort.py 200000 5000 1300 158000000 /tmp/big
+java -jar /path/to/bref3.27Feb25.75f.jar /tmp/big/ref.vcf > /tmp/big/ref.bref3
 
 # .bref3 reference input (needs the separate bref3 conversion tool)
 bash tests/compare_beagle_bref3.sh /path/to/beagle.27Feb25.75f.jar /path/to/bref3.27Feb25.75f.jar /tmp/t1 nthreads=4
