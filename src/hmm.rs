@@ -46,11 +46,10 @@ struct Baum {
     alleles_match: Vec<u64>, // n_markers x words_per_row bitset
     fwd_val: Vec<f32>,       // n_markers x max_states
     bwd_val: Vec<f32>,       // max_states
+    /// per-cluster bitset of states clearing the sparsification threshold,
+    /// filled by the backward pass (which already has the values in hand)
+    keep_mask: Vec<u64>,
     max_states: usize,
-    /// number of retained states in the previous haplotype's `StateProbs`;
-    /// sparsity is similar between haplotypes, so this preallocates the CSR
-    /// arrays instead of growing them by repeated doubling
-    size_hint: usize,
     /// one cluster's worth of retained states, so the filter writes into a
     /// small L1-resident buffer and each cluster appends in one memcpy
     scratch: Vec<StateProb>,
@@ -68,8 +67,8 @@ impl Baum {
             alleles_match: vec![0; n_markers * words_per_row],
             fwd_val: vec![0.0; n_markers * max_states],
             bwd_val: vec![0.0; max_states],
+            keep_mask: vec![0; n_markers * words_per_row],
             max_states,
-            size_hint: 0,
             scratch: vec![
                 StateProb {
                     hap: 0,
@@ -97,8 +96,9 @@ impl Baum {
         let t2 = std::time::Instant::now();
         self.bwd_val[..n_states].fill(1.0 / n_states as f32);
         let mut last_sum = 1.0f32;
+        let threshold = (0.005f32).min(0.9999f32 / n_states as f32);
         for m in (0..=last_marker).rev() {
-            last_sum = self.set_bwd_value(imp_data, m, n_states, last_sum);
+            last_sum = self.set_bwd_value(imp_data, m, n_states, last_sum, threshold);
         }
         let t3 = std::time::Instant::now();
         let r = self.state_probs(n_states);
@@ -158,6 +158,7 @@ impl Baum {
         m: usize,
         n_states: usize,
         last_sum: f32,
+        threshold: f32,
     ) -> f32 {
         let m_p1 = m + 1;
         let p_recomb = if m_p1 < self.n_markers {
@@ -191,8 +192,33 @@ impl Baum {
             *b_slot = b2;
             bwd_val_sum += b2;
         }
-        for f in fwd.iter_mut() {
-            *f /= state_sum; // normalize state probabilities
+        // Normalize the state probabilities, and while each one is in hand
+        // record whether it clears the sparsification threshold here or at
+        // the next cluster. The backward pass runs from the last cluster
+        // down, so cluster m+1 is already final; recording the mask here
+        // saves sparsification a second pass over every state.
+        let max_states = self.max_states;
+        let words_per_row = self.words_per_row;
+        let (head, tail) = self.fwd_val.split_at_mut(row + max_states);
+        let fwd = &mut head[row..row + n_states];
+        let next_row: &[f32] = if m_p1 < self.n_markers {
+            &tail[..n_states]
+        } else {
+            &[]
+        };
+        let mask_row = &mut self.keep_mask[m * words_per_row..(m + 1) * words_per_row];
+        for (wi, word) in mask_row.iter_mut().enumerate() {
+            let base = wi * 64;
+            let hi = (base + 64).min(n_states);
+            let mut bits = 0u64;
+            for j in base..hi {
+                let v = fwd[j] / state_sum; // normalize state probabilities
+                fwd[j] = v;
+                // the last cluster compares against itself, as before
+                let nv = if next_row.is_empty() { v } else { next_row[j] };
+                bits |= (((v > threshold) | (nv > threshold)) as u64) << (j - base);
+            }
+            *word = bits;
         }
         bwd_val_sum
     }
@@ -204,11 +230,21 @@ impl Baum {
     fn state_probs(&mut self, n_states: usize) -> StateProbs {
         let n_markers = self.n_markers;
         let n_markers_m1 = n_markers - 1;
-        let threshold = (0.005f32).min(0.9999f32 / n_states as f32);
         let mut offsets: Vec<u32> = Vec::with_capacity(n_markers + 1);
-        let mut data: Vec<StateProb> = Vec::with_capacity(self.size_hint);
+        // The backward pass already recorded which states are retained, so
+        // the exact final size is a popcount away. Sizing the buffer up front
+        // avoids both the repeated growth and the shrink-back that a guessed
+        // capacity needs -- and since every target haplotype's rows stay live,
+        // each byte over-allocated is a page this run has to fault in.
+        let total: usize = self.keep_mask[..n_markers * self.words_per_row]
+            .iter()
+            .map(|w| w.count_ones() as usize)
+            .sum();
+        let mut data: Vec<StateProb> = Vec::with_capacity(total);
         offsets.push(0);
         let fwd_val = &self.fwd_val;
+        let keep_mask = &self.keep_mask;
+        let words_per_row = self.words_per_row;
         let max_states = self.max_states;
         let mut scratch = std::mem::take(&mut self.scratch);
         self.states.replay(n_states, |m, state_haps| {
@@ -220,42 +256,30 @@ impl Baum {
             };
             let cur = &fwd_val[row..row + n_states];
             let nxt = &fwd_val[row_p1..row_p1 + n_states];
-            // Testing each state inline costs a mispredict whenever the
-            // keep rate is near a coin flip. Build the keep mask 64 states at
-            // a time (a branch-free comparison the compiler can vectorize),
-            // then walk only the set bits, so the work is one cheap pass over
-            // all states plus one iteration per state actually retained.
+            // the backward pass already marked which states are retained, so
+            // this walks only the set bits
             let mut k = 0;
-            for base in (0..n_states).step_by(64) {
-                let hi = (base + 64).min(n_states);
-                let mut mask = 0u64;
-                for j in base..hi {
-                    let keep = (cur[j] > threshold) | (nxt[j] > threshold);
-                    mask |= (keep as u64) << (j - base);
-                }
-                while mask != 0 {
-                    let j = base + mask.trailing_zeros() as usize;
+            for (wi, &word) in keep_mask[m * words_per_row..(m + 1) * words_per_row]
+                .iter()
+                .enumerate()
+            {
+                let mut bits = word;
+                while bits != 0 {
+                    let j = wi * 64 + bits.trailing_zeros() as usize;
                     scratch[k] = StateProb {
                         hap: state_haps[j],
                         prob: cur[j],
                         prob_p1: nxt[j],
                     };
                     k += 1;
-                    mask &= mask - 1;
+                    bits &= bits - 1;
                 }
             }
             data.extend_from_slice(&scratch[..k]);
             offsets.push(data.len() as u32);
         });
         self.scratch = scratch;
-        self.size_hint = data.len();
-        // `size_hint` only approximates this haplotype's sparsity, so the rows
-        // can retain spare capacity. Every target haplotype's rows are held at
-        // once, so on large cohorts that waste dominates peak memory; reclaim
-        // it when it is worth a copy.
-        if data.capacity() > data.len() + (data.len() >> 3) {
-            data.shrink_to_fit();
-        }
+        debug_assert_eq!(data.len(), total);
         StateProbs { offsets, data }
     }
 }
