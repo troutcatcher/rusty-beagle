@@ -50,6 +50,11 @@ struct Baum {
     /// sparsity is similar between haplotypes, so this preallocates the CSR
     /// arrays instead of growing them by repeated doubling
     size_hint: usize,
+    /// one cluster's worth of retained states, so the filter writes into a
+    /// small L1-resident buffer and each cluster appends in one memcpy
+    scr_haps: Vec<i32>,
+    scr_probs: Vec<f32>,
+    scr_probs_p1: Vec<f32>,
 }
 
 impl Baum {
@@ -66,6 +71,9 @@ impl Baum {
             bwd_val: vec![0.0; max_states],
             max_states,
             size_hint: 0,
+            scr_haps: vec![0; max_states],
+            scr_probs: vec![0.0; max_states],
+            scr_probs_p1: vec![0.0; max_states],
         }
     }
 
@@ -201,6 +209,9 @@ impl Baum {
         offsets.push(0);
         let fwd_val = &self.fwd_val;
         let max_states = self.max_states;
+        let mut scr_haps = std::mem::take(&mut self.scr_haps);
+        let mut scr_probs = std::mem::take(&mut self.scr_probs);
+        let mut scr_probs_p1 = std::mem::take(&mut self.scr_probs_p1);
         self.states.replay(n_states, |m, state_haps| {
             let row = m * max_states;
             let row_p1 = if m < n_markers_m1 {
@@ -208,16 +219,37 @@ impl Baum {
             } else {
                 row
             };
+            let cur = &fwd_val[row..row + n_states];
+            let nxt = &fwd_val[row_p1..row_p1 + n_states];
+            let mut k = 0;
             for j in 0..n_states {
-                if fwd_val[row + j] > threshold || fwd_val[row_p1 + j] > threshold {
-                    haps.push(state_haps[j]);
-                    probs.push(fwd_val[row + j]);
-                    probs_p1.push(fwd_val[row_p1 + j]);
+                let a = cur[j];
+                let b = nxt[j];
+                if a > threshold || b > threshold {
+                    scr_haps[k] = state_haps[j];
+                    scr_probs[k] = a;
+                    scr_probs_p1[k] = b;
+                    k += 1;
                 }
             }
+            haps.extend_from_slice(&scr_haps[..k]);
+            probs.extend_from_slice(&scr_probs[..k]);
+            probs_p1.extend_from_slice(&scr_probs_p1[..k]);
             offsets.push(haps.len() as u32);
         });
+        self.scr_haps = scr_haps;
+        self.scr_probs = scr_probs;
+        self.scr_probs_p1 = scr_probs_p1;
         self.size_hint = haps.len();
+        // `size_hint` only approximates this haplotype's sparsity, so the rows
+        // can retain spare capacity. Every target haplotype's rows are held at
+        // once, so on large cohorts that waste dominates peak memory; reclaim
+        // it when it is worth a copy.
+        if haps.capacity() > haps.len() + (haps.len() >> 3) {
+            haps.shrink_to_fit();
+            probs.shrink_to_fit();
+            probs_p1.shrink_to_fit();
+        }
         StateProbs {
             offsets,
             haps,

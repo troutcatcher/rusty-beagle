@@ -135,6 +135,25 @@ since there is no gzip decompression or VCF text parsing to do:
 | 5,000 ref / 200 targ samples, 50k markers | 20.8 s | 6.6 s | 3.2× |
 | peak RSS (5,000-sample run) | 1.58 GB | 0.66 GB | 2.4× less |
 
+A livestock-shaped panel — many animals, one chromosome, few SNPs — where
+the reference is a `.bref3` file of 200,000 animals genotyped at 1,300 SNPs
+across a 158 Mb chromosome, and the target cohort carries every 10th SNP:
+
+| target cohort | Java Beagle 5.5 | rusty-beagle | speedup |
+|---|---|---|---|
+| 500 animals, imputation | 11.2 s | 1.9 s | 5.9× |
+| 500 animals, phasing + imputation | 21.2 s | 7.1 s | 3.0× |
+| 5,000 animals, imputation | 36.9 s | 12.6 s | 2.9× |
+| 5,000 animals, phasing + imputation | 50.9 s | 18.9 s | 2.7× |
+| 20,000 animals, imputation | 120.3 s | 52.6 s | 2.3× |
+| peak RSS (500-animal run) | 2.43 GB | 0.29 GB | 8.4× less |
+| peak RSS (20,000-animal run) | 10.48 GB | 5.23 GB | 2.0× less |
+
+Peak memory in that regime is dominated by the retained per-haplotype HMM
+state probabilities, which both programs hold for every target haplotype at
+once, so it grows with the target cohort rather than with the reference
+panel.
+
 Speed comes from the same parallel structure as Java (per-haplotype HMM,
 per-sample phasing, per-cluster output, parallel input parsing) plus
 Rust-side wins: no JVM warmup/GC, parallel BGZF inflation, and zlib-rs for
