@@ -4,6 +4,7 @@
 
 mod bgzf;
 mod bits;
+mod bref3;
 mod codedsteps;
 mod genmap;
 mod ibs2;
@@ -100,18 +101,26 @@ fn run(par: &Par, log: &mut Log) {
 
     // reference reader
     let ref_path = par.reff.as_deref().unwrap();
-    if ref_path.ends_with(".bref") || ref_path.ends_with(".bref3") {
+    let ref_source: Box<dyn refpanel::RefSource> = if ref_path.ends_with(".bref") {
         eprintln!(
-            "ERROR: bref/bref3 reference files are not supported by rusty-beagle yet;\n\
-             convert with unbref3 to a .vcf.gz file"
+            "ERROR: bref format (.bref) is not supported\n\
+             Reference files should be in bref3 format (.bref3)"
         );
         std::process::exit(1);
-    }
-    let mut ref_raw = vcfio::open_text(ref_path);
-    let (ref_header, ref_first) = vcfio::read_header(&mut ref_raw, ref_path, &exclude_samples);
-    let ref_lines = vcfio::LineSource::new(ref_raw, ref_first);
-    let ref_reader = refpanel::RefReader::new(ref_header, ref_lines, exclude_markers);
-    let ref_it = windows::FilteredRefReader::new(ref_reader, par.chrom.clone());
+    } else if ref_path.ends_with(".bref3") {
+        Box::new(bref3::Bref3RefReader::new(
+            ref_path,
+            &exclude_samples,
+            exclude_markers,
+        ))
+    } else {
+        let mut ref_raw = vcfio::open_text(ref_path);
+        let (ref_header, ref_first) =
+            vcfio::read_header(&mut ref_raw, ref_path, &exclude_samples);
+        let ref_lines = vcfio::LineSource::new(ref_raw, ref_first);
+        Box::new(refpanel::RefReader::new(ref_header, ref_lines, exclude_markers))
+    };
+    let ref_it = windows::FilteredRefReader::new(ref_source, par.chrom.clone());
 
     let targ_samples = targ_it.header.samples.clone();
     let ref_samples = ref_it.samples();

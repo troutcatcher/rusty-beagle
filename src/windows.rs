@@ -4,7 +4,7 @@
 use crate::genmap::GeneticMap;
 use crate::marker::Marker;
 use crate::par::Par;
-use crate::refpanel::{RefReader, RefRec};
+use crate::refpanel::{RefRec, RefSource};
 use crate::vcfio::{GtRec, LineSource, VcfHeader};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -149,27 +149,22 @@ impl TargReader {
 
 /// Reference reader wrapper applying the chrom-interval filter.
 pub struct FilteredRefReader {
-    inner: RefReader,
+    inner: Box<dyn RefSource>,
     chrom_int: Option<crate::par::ChromInterval>,
 }
 
 impl FilteredRefReader {
-    pub fn new(inner: RefReader, chrom_int: Option<crate::par::ChromInterval>) -> Self {
+    pub fn new(inner: Box<dyn RefSource>, chrom_int: Option<crate::par::ChromInterval>) -> Self {
         FilteredRefReader { inner, chrom_int }
     }
 
-    #[allow(dead_code)]
-    pub fn n_haps(&self) -> usize {
-        self.inner.n_haps()
-    }
-
     pub fn samples(&self) -> crate::vcfio::Samples {
-        self.inner.header.samples.clone()
+        self.inner.samples()
     }
 
     pub fn next(&mut self) -> Option<Arc<RefRec>> {
         loop {
-            let rec = self.inner.next()?;
+            let rec = self.inner.next_rec()?;
             match &self.chrom_int {
                 None => return Some(rec),
                 Some(ci) => {

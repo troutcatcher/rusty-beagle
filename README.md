@@ -23,9 +23,12 @@ pipelines.
 ## Scope
 
 Ported: the full **phasing + imputation** pipeline for a phased reference
-panel (`ref=`, VCF format) and a phased *or unphased* target (`gt=`):
+panel (`ref=`, VCF or bref3 format) and a phased *or unphased* target
+(`gt=`):
 
 - gzip/BGZF VCF input, with parallel BGZF block decompression
+- binary reference (`.bref3`) input, decoded directly with no VCF
+  round-trip — see below
 - marker windows, window overlap and splice logic
 - PLINK genetic-map interpolation
 - Beagle's low-memory allele-coded / sequence-coded reference representation
@@ -44,8 +47,20 @@ Like Java Beagle, phased output depends on `seed` *and* `nthreads` (Beagle
 partitions PBWT windows/batches by thread count); rusty-beagle reproduces
 Java's output exactly for any given (`seed`, `nthreads`) pair.
 
-Not (yet) ported: reference-free phasing — `ref=` is required, and `bref3`
-reference files are not supported (use `unbref3` to convert to `.vcf.gz`).
+`ref=some.bref3` is a drop-in alternative to `ref=some.vcf.gz`: rusty-beagle
+decodes the file's own block/sequence-coding structure directly instead of
+re-deriving it from VCF text, which is both faster and lower-memory than the
+VCF path (bref3 is already compact, so there's no decompression or text
+parsing to do). Note that a bref3 file's block boundaries are fixed at
+*conversion* time and are semantically relevant to marker clustering (see
+`docs/PORT_NOTES.md`), so imputing from a pre-converted bref3 file can give
+different (equally valid) output than imputing from the original VCF the
+bref3 was built from — this is inherent Beagle behavior, not a rusty-beagle
+quirk, and rusty-beagle matches Java Beagle exactly for either input.
+
+Not (yet) ported: reference-free phasing — `ref=` is required. Old-format
+`.bref` (not `.bref3`) files are not supported, matching Java Beagle, which
+also rejects them.
 
 ## Correctness
 
@@ -73,8 +88,13 @@ Phasing suites (unphased and partially phased targets):
 | ph6 | haploid samples mixed with unphased diploid samples |
 | ph7 | two chromosomes, multi-window phasing |
 | — | `impute=false` (phase-only output), single- and multi-window |
+| — | `.bref3` reference input (both default and forced-small-block encodings), including with `excludesamples`/`excludemarkers`/`chrom` and with phasing |
 
-All suites produce byte-identical output to `beagle.27Feb25.75f.jar`.
+All suites produce byte-identical output to `beagle.27Feb25.75f.jar`. Since a
+bref3 file's own block boundaries can make its output legitimately differ
+from imputing the same data straight from VCF (see Scope above), the bref3
+suites compare rusty-beagle against Java Beagle reading the *same* `.bref3`
+file, generated with the `bref3` conversion tool from the same release.
 Bit-parity is achieved by porting the algorithms operation-for-operation,
 including `java.util.Random`, `java.util.PriorityQueue`'s heap layout (its
 tie-breaking affects composite-haplotype construction), f32 arithmetic order
@@ -105,6 +125,17 @@ markers genotyped in the target):
 | peak RSS (2,000-sample run) | 0.71 GB | 0.24 GB | 2.9× less |
 | peak RSS (5,000-sample run) | 1.35 GB | 0.67 GB | 2.0× less |
 
+Imputation of a phased target from a `.bref3` reference panel (same panels,
+converted with the `bref3` tool at its default block size) is faster still,
+since there's no gzip decompression or VCF text parsing to do:
+
+| workload | Java Beagle 5.5 | rusty-beagle | speedup |
+|---|---|---|---|
+| 2,000 ref / 100 targ samples, 20k markers | 6.8 s | 3.2 s | 2.1× |
+| 5,000 ref / 200 targ samples, 50k markers | 21.6 s | 13.0 s | 1.7× |
+| peak RSS (2,000-sample run) | 0.80 GB | 0.23 GB | 3.5× less |
+| peak RSS (5,000-sample run) | 1.52 GB | 0.64 GB | 2.4× less |
+
 Speed comes from the same parallel structure as Java (per-haplotype HMM,
 per-sample phasing, per-cluster output, parallel input parsing) plus
 Rust-side wins: no JVM warmup/GC, parallel BGZF inflation, flat
@@ -127,6 +158,9 @@ cargo test                     # unit tests (java.util.Random port, formats)
 ```
 python3 tests/gen_test_data.py --out-dir /tmp/t1
 bash tests/compare_beagle.sh /path/to/beagle.27Feb25.75f.jar /tmp/t1 nthreads=4
+
+# .bref3 reference input (needs the separate bref3 conversion tool)
+bash tests/compare_beagle_bref3.sh /path/to/beagle.27Feb25.75f.jar /path/to/bref3.27Feb25.75f.jar /tmp/t1 nthreads=4
 ```
 
 ## License

@@ -9,14 +9,15 @@ Debian/Ubuntu packaging of the identical upstream release
 ## Scope
 
 rusty-beagle ports the **phasing + imputation** pipeline: `ref=` (phased
-reference VCF) + `gt=` (phased or unphased target VCF) → phased/imputed
-`out.vcf.gz`. A fully phased, non-missing target takes the fast path
-(`Main.phaseAndImpute` skips phasing whenever `fpd.targGT().isPhased()`);
-otherwise the target is phased against the reference panel first, exactly as
-in the Java `phase` package. `impute=false` restricts windows to target
-markers and prints phased target genotypes only. Reference-free phasing
-(no `ref=`) and `bref3` input are not ported; rusty-beagle exits with a
-clear error in those cases.
+reference VCF or bref3) + `gt=` (phased or unphased target VCF) →
+phased/imputed `out.vcf.gz`. A fully phased, non-missing target takes the
+fast path (`Main.phaseAndImpute` skips phasing whenever
+`fpd.targGT().isPhased()`); otherwise the target is phased against the
+reference panel first, exactly as in the Java `phase` package. `impute=false`
+restricts windows to target markers and prints phased target genotypes only.
+Reference-free phasing (no `ref=`) is not ported; rusty-beagle exits with a
+clear error in that case, as does old-format `.bref` (non-v3) input, matching
+Java Beagle's own rejection of that format.
 
 The goal is *bit-identical output* to Java Beagle (up to the `##filedate`
 header line), achieved by porting the algorithms operation-for-operation,
@@ -46,7 +47,8 @@ including:
 | `vcf.Marker`+`MarkerParser` | `marker.rs` | stores ID + REF/ALT + INFO/END; equality = (chrom,pos,alleles,END) |
 | `vcf.VcfIt` (`TO_LOWMEM_GT_REC`) | `vcfio.rs` | target GT records; phased flag per record |
 | `vcf.RefIt` + `bref.SeqCoder3` | `refpanel.rs` | allele-coded records + sequence-coding simulation; the seq-coded *block boundaries* (flush on chrom change / EOF / >maxNSeq sequences) are semantically relevant: they force marker-cluster splits in `ImpData.targBlockEnd` |
-| `vcf.RefTargSlidingWindow` | `windows.rs` | window/overlap/splice logic, `MarkerIndices` |
+| `bref.Bref3Header` + `bref.Bref3Reader` + `bref.Bref3It` | `bref3.rs` | binary reference (`.bref3`) input; decodes the file's own stored block/sequence-coding structure directly (no VCF round-trip, no re-run of `SeqCoder3`) — see notes below |
+| `vcf.RefTargSlidingWindow` | `windows.rs` | window/overlap/splice logic, `MarkerIndices`; dispatches `ref=` to `refpanel::RefReader` or `bref3::Bref3RefReader` behind a shared `RefSource` trait, by file extension, exactly like Java's `.bref3` vs. VCF dispatch |
 | `vcf.GeneticMap`/`PlinkGenMap`/`PositionMap` | `genmap.rs` | PLINK map interpolation w/ 5cM end rule; default pos*1e-6 |
 | `imp.ImpData` + `imp.HaplotypeCoder` | `impdata.rs` | marker clusters, per-cluster allele-sequence coding (both `codeSeq` and the seq-coded composition path) |
 | `imp.CodedSteps` + `imp.ImpIbs` | `impibs.rs` | PBWT-like partition refinement per step; `Random(seed + parent[0])` subsets |
@@ -118,9 +120,63 @@ Phasing-specific notes:
   print phased target genotypes without dosage fields, via
   `WindowWriter.printPhased`.
 
+bref3-specific notes:
+
+- A bref3 file is a sequence of self-describing blocks (record count, chrom
+  name, a shared hap→seq map, then per-marker data) ending in a zero-record
+  sentinel, followed by a random-access index that neither Java's `Bref3It`
+  nor rusty-beagle ever reads — both decode strictly sequentially from the
+  start of the file.
+- Each on-disk block becomes one `RefAlleles::SeqCoded` block id in
+  `RefRec`, reproducing Java's `rec.map(0) != hapToSeq` object-identity
+  check: every marker decoded from one block-header read shares one id
+  (one shared `hap2seq` `Arc`), exactly as they share one `hapToSeq`
+  reference in Java. rusty-beagle does not re-run `SeqCoder3` on bref3
+  input — the file's stored block boundaries are used verbatim.
+- A marker is stored either sequence-coded (a shared per-block hap→seq map
+  plus a per-record seq→allele byte array) or, when it didn't compress well
+  at conversion time, allele-coded (a length-prefixed haplotype list per
+  non-major allele, with a `-1` length sentinel marking the major allele's
+  slot).
+- Because those block boundaries are fixed once, at `bref3` conversion
+  time, by whatever `SeqCoder3` state the *conversion* run happened to be
+  in, they are not guaranteed to match the boundaries a fresh read of the
+  same data from VCF would independently choose. Since block boundaries
+  force marker-cluster splits (`ImpData.targBlockEnd`), imputing from a
+  pre-converted `.bref3` file can therefore give different — but equally
+  valid — output than imputing from the VCF it was converted from. This is
+  a property of the Java algorithm, reproduced faithfully rather than
+  worked around; verified empirically (Java itself gives different output
+  for the two inputs on a multi-chromosome test panel), so the bref3
+  parity suites compare rusty-beagle against Java reading the *same*
+  `.bref3` file rather than against a VCF baseline.
+- `excludesamples=`/`excludemarkers=`/`chrom=` are applied when the bref3
+  file is *read*, independent of how it was converted: sample exclusion
+  remaps haplotype indices (`Bref3Header.filteredHapIndices` /
+  `invfilteredHapIndices`) while decoding each block's hap→seq map and each
+  allele-coded record's per-allele haplotype lists; excluded samples' data
+  is skipped, not decoded into the panel.
+- Sample IDs, marker IDs, chromosome names, and REF/ALT alleles are stored
+  as Java's "modified UTF-8" (`DataInput.readUTF`): standard UTF-8 except
+  NUL is coded as the two bytes `0xC0,0x80`, and characters outside the
+  BMP are coded as a pair of independently 3-byte-encoded UTF-16
+  surrogates (CESU-8) rather than one 4-byte sequence. `bref3.rs` decodes
+  this explicitly rather than assuming plain UTF-8, covered by unit tests
+  since no real-world genomic data exercises those code paths.
+- SNV alleles (a REF/ALT set drawn from A/C/G/T) are coded compactly as one
+  byte: a permutation index into the 24 orderings of "A","C","G","T" plus
+  an allele count, rather than as explicit strings. The 24-entry
+  permutation table is cross-checked by unit test against a direct port of
+  `Bref3Reader.snvPerms()`'s recursive generator.
+
 ## Validation
 
 `tests/` contains a harness that generates synthetic phased ref/target panels,
 masks markers from the target, runs both Java Beagle (`beagle.jar`, from the
 Debian package of the same release) and rusty-beagle, and diffs the gunzipped
-output VCFs (ignoring `##filedate`). See README for results.
+output VCFs (ignoring `##filedate`). `tests/compare_beagle_bref3.sh` is the
+same idea for `.bref3` reference input: it converts `ref.vcf.gz` with the
+separate `bref3` conversion tool, then runs both programs with
+`ref=<the bref3 file>` (not against the VCF baseline — see the bref3-specific
+notes above for why that comparison isn't meaningful). See README for
+results.

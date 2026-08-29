@@ -8,8 +8,15 @@
 //! composed representation makes per-cluster haplotype coding fast.
 
 use crate::marker::Marker;
-use crate::vcfio::{nth_tab_pos, VcfHeader};
+use crate::vcfio::{nth_tab_pos, Samples, VcfHeader};
 use std::sync::Arc;
+
+/// Common interface for reference-panel sources: VCF text (`RefReader`) or
+/// binary bref3 (`bref3::Bref3RefReader`).
+pub trait RefSource: Send {
+    fn next_rec(&mut self) -> Option<Arc<RefRec>>;
+    fn samples(&self) -> Samples;
+}
 
 /// Allele storage for one reference record.
 pub enum RefAlleles {
@@ -691,5 +698,15 @@ impl RefReader {
             self.fill();
         }
         self.out.pop_front().map(Arc::new)
+    }
+}
+
+impl RefSource for RefReader {
+    fn next_rec(&mut self) -> Option<Arc<RefRec>> {
+        self.next()
+    }
+
+    fn samples(&self) -> Samples {
+        self.header.samples.clone()
     }
 }
