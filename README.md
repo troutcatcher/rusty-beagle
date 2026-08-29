@@ -120,10 +120,10 @@ markers genotyped in the target):
 
 | workload | Java Beagle 5.5 | rusty-beagle | speedup |
 |---|---|---|---|
-| 2,000 ref / 100 targ samples, 20k markers | 13.0 s | 5.9 s | 2.2× |
-| 5,000 ref / 200 targ samples, 50k markers | 41.8 s | 24.8 s | 1.7× |
-| peak RSS (2,000-sample run) | 0.74 GB | 0.22 GB | 3.4× less |
-| peak RSS (5,000-sample run) | 1.33 GB | 0.64 GB | 2.1× less |
+| 2,000 ref / 100 targ samples, 20k markers | 10.2 s | 3.6 s | 2.8× |
+| 5,000 ref / 200 targ samples, 50k markers | 30.2 s | 14.2 s | 2.1× |
+| peak RSS (2,000-sample run) | 0.93 GB | 0.22 GB | 4.2× less |
+| peak RSS (5,000-sample run) | 1.60 GB | 0.64 GB | 2.5× less |
 
 Imputation of a phased target from a `.bref3` reference panel (same panels,
 converted with the `bref3` tool at its default block size) is faster still,
@@ -142,10 +142,11 @@ across a 158 Mb chromosome, and the target cohort carries every 10th SNP:
 | target cohort | Java Beagle 5.5 | rusty-beagle | speedup |
 |---|---|---|---|
 | 500 animals, imputation | 9.0 s | 1.6 s | 5.6× |
-| 500 animals, phasing + imputation | 16.7 s | 6.8 s | 2.5× |
+| 500 animals, phasing + imputation | 14.3 s | 4.2 s | 3.4× |
 | 5,000 animals, imputation | 32.5 s | 8.1 s | 4.0× |
-| 5,000 animals, phasing + imputation | 48.6 s | 14.9 s | 3.3× |
+| 5,000 animals, phasing + imputation | 40.1 s | 10.1 s | 4.0× |
 | 20,000 animals, imputation | 125.3 s | 32.6 s | 3.8× |
+| 20,000 animals, phasing + imputation | 121.1 s | 30.6 s | 4.0× |
 | peak RSS (500-animal run) | 2.18 GB | 0.26 GB | 8.3× less |
 | peak RSS (20,000-animal run) | 12.60 GB | 4.59 GB | 2.7× less |
 
@@ -179,9 +180,12 @@ by bit-parity with Java:
   with a bitset instead of sorting the full multiset (millions of entries per
   cluster, tens of thousands distinct)
 
-Phasing gains less than imputation because most of its time goes to the
-`PhaseBaum2` forward/backward passes, which are float arithmetic in a fixed
-evaluation order rather than the layout-bound loops above.
+Phasing repeats its reference-panel work on every iteration -- re-coding
+allele sequences per step and rebuilding the PBWT over every haplotype -- so
+against a large reference that work, not the per-sample HMM, is what it
+costs. Both are addressed above (the integer hasher and the narrowed step
+tables); what remains is the `PhaseBaum2` forward/backward passes, which are
+float arithmetic in an evaluation order fixed by bit-parity.
 
 `RUSTFLAGS="-C target-cpu=native"` is not recommended: on the benchmark
 machine it came out marginally *slower* than the portable build once the hot
