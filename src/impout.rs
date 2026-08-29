@@ -709,7 +709,14 @@ impl WindowWriter {
     }
 
     /// `WindowWriter.printPhased` (no-imputation windows: GT-only records).
-    pub fn print_phased(&mut self, window: &Window, start: usize, end: usize) {
+    /// `phased[m][hap]` supplies the phased alleles for target marker m.
+    pub fn print_phased(
+        &mut self,
+        window: &Window,
+        phased: &[Vec<i16>],
+        start: usize,
+        end: usize,
+    ) {
         let step = 100usize;
         let mut chunk_ranges = Vec::new();
         let mut m = start;
@@ -724,7 +731,7 @@ impl WindowWriter {
                 let mut text = String::new();
                 for t in s..e {
                     let rec = &window.targ_recs[t];
-                    phased_rec(rec, &self.samples, &mut text);
+                    phased_rec(&rec.marker, &phased[t], &self.samples, &mut text);
                 }
                 bgzf::compress(text.as_bytes())
             })
@@ -742,8 +749,12 @@ impl WindowWriter {
 }
 
 /// `VcfWriter.appendRecords` for one phased target record (GT only).
-fn phased_rec(rec: &crate::vcfio::GtRec, samples: &Samples, out: &mut String) {
-    let marker = &rec.marker;
+fn phased_rec(
+    marker: &crate::marker::Marker,
+    alleles: &[i16],
+    samples: &Samples,
+    out: &mut String,
+) {
     out.push_str(&marker.chrom());
     out.push('\t');
     let _ = write!(out, "{}", marker.pos);
@@ -765,11 +776,11 @@ fn phased_rec(rec: &crate::vcfio::GtRec, samples: &Samples, out: &mut String) {
     for (s, &diploid) in samples.is_diploid.iter().enumerate() {
         let h1 = s << 1;
         out.push('\t');
-        let a1 = rec.alleles[h1];
+        let a1 = alleles[h1];
         let _ = write!(out, "{}", a1);
         if diploid {
             out.push('|');
-            let _ = write!(out, "{}", rec.alleles[h1 | 1]);
+            let _ = write!(out, "{}", alleles[h1 | 1]);
         }
     }
     out.push('\n');

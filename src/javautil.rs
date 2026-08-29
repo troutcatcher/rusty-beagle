@@ -31,6 +31,21 @@ impl JavaRandom {
         self.next(32)
     }
 
+    /// `Random.setSeed(seed)`
+    pub fn set_seed(&mut self, seed: i64) {
+        self.seed = (seed as u64 ^ MULTIPLIER) & MASK;
+    }
+
+    /// `Random.nextLong()`
+    pub fn next_long(&mut self) -> i64 {
+        ((self.next(32) as i64) << 32).wrapping_add(self.next(32) as i64)
+    }
+
+    /// `Random.nextBoolean()`
+    pub fn next_boolean(&mut self) -> bool {
+        self.next(1) != 0
+    }
+
     /// `Random.nextInt(bound)` for `bound > 0`.
     pub fn next_int_bound(&mut self, bound: i32) -> i32 {
         debug_assert!(bound > 0);

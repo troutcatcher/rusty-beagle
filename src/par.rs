@@ -32,6 +32,9 @@ pub struct Par {
 
     // general parameters
     pub em: bool,
+    pub initial_lr: f32,
+    pub step_scale: f32,
+    pub rare: f32,
     pub ne: f32,
     pub err: f32,
     pub window: f32,
@@ -213,6 +216,11 @@ impl Par {
         let gp = bool_arg(&mut map, "gp", false);
 
         let em = bool_arg(&mut map, "em", true);
+        let initial_lr =
+            get(&mut map, "initial-lr").map_or(100_000.0, |v| parse_or_exit("initial-lr", &v));
+        let step_scale =
+            get(&mut map, "step-scale").map_or(3.0, |v| parse_or_exit("step-scale", &v));
+        let rare = get(&mut map, "rare").map_or(0.002, |v| parse_or_exit("rare", &v));
         let ne = get(&mut map, "ne").map_or(100_000.0, |v| parse_or_exit("ne", &v));
         // D_ERR = -Float.MIN_VALUE signals "data dependent"
         let err = get(&mut map, "err").map_or(-f32::MIN_POSITIVE, |v| parse_or_exit("err", &v));
@@ -228,7 +236,7 @@ impl Par {
         };
         // Accept and ignore documented phasing-only params so Beagle command
         // lines run unchanged.
-        for k in ["initial-lr", "step-scale", "rare", "truth", "ped"] {
+        for k in ["truth", "ped"] {
             map.remove(k);
         }
         if !map.is_empty() {
@@ -258,6 +266,9 @@ impl Par {
             ap,
             gp,
             em,
+            initial_lr,
+            step_scale,
+            rare,
             ne,
             err,
             window,
@@ -267,6 +278,18 @@ impl Par {
             seed,
             nthreads,
         }
+    }
+
+    pub fn rare(&self) -> f32 {
+        self.rare
+    }
+
+    pub fn step_scale(&self) -> f32 {
+        self.step_scale
+    }
+
+    pub fn initial_lr(&self) -> f32 {
+        self.initial_lr
     }
 
     /// `Par.err(nHaps)`: explicit err parameter, or the Li&Stephens allele

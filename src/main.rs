@@ -3,7 +3,11 @@
 //! Pipeline driver (port of `main.Main` for the phased-target path).
 
 mod bgzf;
+mod bits;
+mod codedsteps;
 mod genmap;
+mod ibs2;
+mod initphase;
 mod hmm;
 mod impdata;
 mod impibs;
@@ -12,9 +16,15 @@ mod impstates;
 mod javautil;
 mod marker;
 mod par;
+mod pbwt;
+mod phasebaum;
+mod phasedata;
+mod phaseibs;
 mod refpanel;
+mod stage2;
 mod vcfio;
 mod windows;
+mod xref;
 
 use par::Par;
 use std::io::Write;
@@ -119,6 +129,9 @@ fn run(par: &Par, log: &mut Log) {
 
     let timing = std::env::var("RUSTY_BEAGLE_TIMING").is_ok();
     let mut window_count = 0usize;
+    // Main.rand: per-window seeds for phasing
+    let mut window_rand = javautil::JavaRandom::new(par.seed);
+    let mut overlap: Option<phasedata::PhasedOverlap> = None;
     loop {
         let t_read = Instant::now();
         let window = match bg.next_window() {
@@ -141,25 +154,60 @@ fn run(par: &Par, log: &mut Log) {
             indices.n_markers(),
             indices.n_targ_markers()
         ));
-        if !window.targ_is_phased() {
-            eprintln!(
-                "\nERROR: the target VCF contains unphased or missing genotypes.\n\
-                 rusty-beagle currently ports Beagle's imputation stage only, which requires\n\
-                 a phased, non-missing target (Java Beagle skips phasing for such input, so\n\
-                 outputs are directly comparable).  Phase the target first, e.g. with:\n\
-                 java -jar beagle.jar gt={} out=phased impute=false",
-                par.gt
-            );
-            std::process::exit(1);
-        }
+        let phased_input = window.targ_is_phased();
+        let seed = window_rand.next_long();
+        let phased_targ: Vec<Vec<i16>> = if phased_input && overlap.is_none() {
+            window.targ_recs.iter().map(|r| r.alleles.clone()).collect()
+        } else {
+            let t0 = Instant::now();
+            let fpd = std::sync::Arc::new(phasedata::FixedPhaseData::new(
+                par,
+                genmap.as_ref(),
+                &window,
+                overlap.as_ref(),
+            ));
+            if phased_input {
+                fpd.targ.clone()
+            } else {
+                let mut pd = phasedata::PhaseData::new(fpd.clone(), par, seed);
+                let n_its = (par.burnin + par.iterations) as usize;
+                let max_burnin_swap_rate = 0.01f64;
+                while pd.it < n_its {
+                    phasebaum::run_stage1(&mut pd, par);
+                    pd.increment_it(par);
+                    let swap_rate = phasedata::swap_rate_get_and_reset();
+                    if pd.it < par.burnin as usize && swap_rate <= max_burnin_swap_rate {
+                        pd.advance_to_first_phasing_it(par);
+                    }
+                }
+                let result = if fpd.n_stage1_markers() == fpd.targ.len() {
+                    stage2::stage1_marker_alleles(&pd)
+                } else {
+                    let (s2, stage1_alleles) = stage2::run_stage2(&pd, par);
+                    (0..fpd.targ.len())
+                        .map(|m| s2.alleles_at(&fpd, &|m1| stage1_alleles[m1].clone(), m))
+                        .collect()
+                };
+                log.println(&format!(
+                    "Phasing time     : {:.2} seconds",
+                    t0.elapsed().as_secs_f64()
+                ));
+                result
+            }
+        };
         let impute = indices.n_markers() != indices.n_targ_markers();
         if !impute {
             let m_start = indices.targ_prev_splice;
             let m_end = indices.targ_next_splice;
-            writer.print_phased(&window, m_start, m_end);
+            writer.print_phased(&window, &phased_targ, m_start, m_end);
         } else {
             let t0 = Instant::now();
-            let imp_data = impdata::ImpData::new(par, &window, genmap.as_ref(), &targ_samples);
+            let targ_alleles: Vec<Vec<u8>> = phased_targ
+                .iter()
+                .map(|row| row.iter().map(|&a| a as u8).collect())
+                .collect();
+            let imp_data =
+                impdata::ImpData::new(par, &window, genmap.as_ref(), &targ_samples, targ_alleles);
             let t1 = Instant::now();
             let ibs_haps = impibs::ImpIbs::new(&imp_data);
             let t2 = Instant::now();
@@ -182,6 +230,16 @@ fn run(par: &Par, log: &mut Log) {
                 t0.elapsed().as_secs_f64()
             ));
         }
+        // phased overlap for the next window
+        let o_start = indices.targ_overlap_start;
+        let o_end = indices.targ_next_splice;
+        overlap = if o_end > o_start {
+            Some(phasedata::PhasedOverlap {
+                alleles: phased_targ[o_start..o_end].to_vec(),
+            })
+        } else {
+            None
+        };
     }
     writer.close();
     let stats = bg.finish();

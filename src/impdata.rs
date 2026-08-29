@@ -105,18 +105,12 @@ impl ImpData {
         window: &Window,
         genmap: &GeneticMap,
         targ_samples: &crate::vcfio::Samples,
+        targ_alleles: Vec<Vec<u8>>,
     ) -> ImpData {
         let indices = &window.indices;
         let targ_to_ref = &indices.targ_marker_to_marker;
         let n_targ_markers = targ_to_ref.len();
         let ref_recs = &window.ref_recs;
-
-        // target alleles (phased, non-missing)
-        let targ_alleles: Vec<Vec<u8>> = window
-            .targ_recs
-            .iter()
-            .map(|r| r.alleles.iter().map(|&a| a as u8).collect())
-            .collect();
         let n_targ_haps = if n_targ_markers > 0 {
             targ_alleles[0].len()
         } else {
