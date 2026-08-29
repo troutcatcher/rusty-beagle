@@ -29,6 +29,13 @@ impl Fmt {
     }
 }
 
+/// Per-thread buffers reused across the marker clusters of a window.
+#[derive(Default)]
+struct OutScratch {
+    hap_to_index: Vec<u32>,
+    seen: Vec<u64>,
+}
+
 /// Port of `imp.RefHapHash`.
 ///
 /// The per-haplotype ALT-allele lists are held in one flat CSR buffer rather
@@ -60,18 +67,38 @@ impl<'a> RefHapHash<'a> {
         ref_recs: &'a [Arc<RefRec>],
         n_ref_haps: usize,
         hap_to_index: &'a mut Vec<u32>,
+        seen: &mut Vec<u64>,
         start: usize,
         end: usize,
     ) -> RefHapHash<'a> {
         assert!(start < end);
-        let mut list: Vec<i32> = Vec::with_capacity(10 * state_probs.len());
+        // Every state of every target haplotype names a reference haplotype,
+        // but only a small fraction are distinct (millions of states, tens of
+        // thousands of haplotypes at 200k reference samples). Mark first
+        // sightings in a bitset so only the distinct haplotypes are collected
+        // and sorted, rather than sorting the full multiset.
+        let n_words = (n_ref_haps + 63) >> 6;
+        if seen.len() < n_words {
+            seen.resize(n_words, 0);
+        }
+        let mut list: Vec<i32> = Vec::new();
         for sp in state_probs {
             for st in sp.states(targ_cluster) {
-                list.push(st.hap);
+                let h = st.hap as usize;
+                let bit = 1u64 << (h & 63);
+                let word = &mut seen[h >> 6];
+                if *word & bit == 0 {
+                    *word |= bit;
+                    list.push(st.hap);
+                }
             }
         }
         list.sort_unstable();
-        list.dedup();
+        // clearing whole words is safe: every bit set above belongs to a
+        // haplotype in `list`, so this leaves the bitset all-zero again
+        for &h in &list {
+            seen[h as usize >> 6] = 0;
+        }
         let i2hap = list;
         let n = i2hap.len();
         let _ = targ_cluster;
@@ -499,7 +526,7 @@ fn append_records(
     targ_cluster: usize,
     fmt: &Fmt,
     hom_ref: &[String],
-    hap_to_index: &mut Vec<u32>,
+    scratch_out: &mut OutScratch,
 ) -> String {
     // bounds from the ImputedVcfWriter constructor
     let ref_start = if targ_cluster == 0 {
@@ -527,7 +554,8 @@ fn append_records(
         targ_cluster,
         ref_recs,
         imp_data.n_ref_haps,
-        hap_to_index,
+        &mut scratch_out.hap_to_index,
+        &mut scratch_out.seen,
         ref_start,
         ref_end,
     );
@@ -777,7 +805,7 @@ impl WindowWriter {
     ) {
         let chunks: Vec<Vec<u8>> = (0..imp_data.n_clusters)
             .into_par_iter()
-            .map_init(Vec::<u32>::new, |hap_to_index, c| {
+            .map_init(OutScratch::default, |scratch_out, c| {
                 let t0 = std::time::Instant::now();
                 let text = append_records(
                     imp_data,
@@ -789,7 +817,7 @@ impl WindowWriter {
                     c,
                     &self.fmt,
                     &self.hom_ref,
-                    hap_to_index,
+                    scratch_out,
                 );
                 let t1 = std::time::Instant::now();
                 let out = if text.is_empty() {
