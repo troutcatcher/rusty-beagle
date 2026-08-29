@@ -10,7 +10,7 @@ name = "rusty-beagle"
 path = "src/main.rs"
 
 [dependencies]
-flate2 = "1"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 rayon = "1"
 
 [profile.release]

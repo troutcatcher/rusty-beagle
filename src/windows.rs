@@ -181,8 +181,8 @@ impl FilteredRefReader {
 }
 
 /// Port of `vcf.RefTargSlidingWindow.Reader`.
-pub struct SlidingWindows<'a> {
-    genmap: &'a GeneticMap,
+pub struct SlidingWindows {
+    genmap: Arc<GeneticMap>,
     window_cm: f64,
     window_markers: usize,
     overlap_cm: f64,
@@ -209,13 +209,13 @@ pub struct SlidingWindows<'a> {
     pub cum_ref_markers: usize,
 }
 
-impl<'a> SlidingWindows<'a> {
+impl SlidingWindows {
     pub fn new(
         par: &Par,
-        genmap: &'a GeneticMap,
+        genmap: Arc<GeneticMap>,
         targ_it: TargReader,
         ref_it: FilteredRefReader,
-    ) -> SlidingWindows<'a> {
+    ) -> SlidingWindows {
         SlidingWindows {
             genmap,
             window_cm: par.window as f64,
@@ -406,8 +406,8 @@ impl<'a> SlidingWindows<'a> {
             window_index,
             last_window,
             indices,
-            ref_recs: std::mem::take(&mut self.ref_recs),
-            targ_recs: std::mem::take(&mut self.targ_recs),
+            ref_recs: self.ref_recs.clone(),
+            targ_recs: self.targ_recs.clone(),
         }
     }
 
@@ -454,5 +454,58 @@ impl<'a> SlidingWindows<'a> {
                 break;
             }
         }
+    }
+}
+
+/// Cumulative statistics reported when the background reader finishes.
+pub struct WindowStats {
+    pub cum_targ_markers: usize,
+    pub cum_ref_markers: usize,
+}
+
+/// Runs the sliding-window reader on a background thread (like Java's
+/// daemon `Reader` with an `ArrayBlockingQueue(1)`), so the next window is
+/// decompressed and parsed while the current one is being imputed.
+pub struct BackgroundWindows {
+    rx: std::sync::mpsc::Receiver<Window>,
+    stats_rx: std::sync::mpsc::Receiver<WindowStats>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl BackgroundWindows {
+    pub fn spawn(mut sliding: SlidingWindows) -> BackgroundWindows {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Window>(1);
+        let (stats_tx, stats_rx) = std::sync::mpsc::sync_channel::<WindowStats>(1);
+        let handle = std::thread::spawn(move || {
+            while let Some(window) = sliding.next_window() {
+                if tx.send(window).is_err() {
+                    return; // consumer dropped
+                }
+            }
+            let _ = stats_tx.send(WindowStats {
+                cum_targ_markers: sliding.cum_targ_markers,
+                cum_ref_markers: sliding.cum_ref_markers,
+            });
+        });
+        BackgroundWindows {
+            rx,
+            stats_rx,
+            handle: Some(handle),
+        }
+    }
+
+    pub fn next_window(&mut self) -> Option<Window> {
+        self.rx.recv().ok()
+    }
+
+    pub fn finish(mut self) -> WindowStats {
+        let stats = self.stats_rx.recv().unwrap_or(WindowStats {
+            cum_targ_markers: 0,
+            cum_ref_markers: 0,
+        });
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+        stats
     }
 }

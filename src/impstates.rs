@@ -151,22 +151,57 @@ impl ImpStates {
             self.comp_hap_to_hap[j] = self.comp_hap_hap[j][0];
             self.comp_hap_to_end[j] = self.comp_hap_end[j][0];
         }
+        let n_ref = imp_data.n_ref_haps;
         for m in 0..self.n_clusters {
             let targ_allele = imp_data.allele(m, shifted_targ_hap);
             let row = m * max_states;
-            let coding = &imp_data.hap_to_seq[m];
-            let n_ref = imp_data.n_ref_haps;
+            let m_i32 = m as i32;
             for j in 0..n_comp_haps {
-                if m as i32 == self.comp_hap_to_end[j] {
+                if m_i32 == self.comp_hap_to_end[j] {
                     self.comp_hap_to_list_index[j] += 1;
                     self.comp_hap_to_hap[j] =
                         self.comp_hap_hap[j][self.comp_hap_to_list_index[j]];
                     self.comp_hap_to_end[j] =
                         self.comp_hap_end[j][self.comp_hap_to_list_index[j]];
                 }
-                let hap = self.comp_hap_to_hap[j];
-                hap_indices[row + j] = hap;
-                al_match[row + j] = coding.get(hap as usize, n_ref) == targ_allele;
+            }
+            let haps = &self.comp_hap_to_hap[..n_comp_haps];
+            let hap_out = &mut hap_indices[row..row + n_comp_haps];
+            let match_out = &mut al_match[row..row + n_comp_haps];
+            match &imp_data.hap_to_seq[m] {
+                crate::impdata::ClusterCoding::Composed {
+                    hap2seq,
+                    seq1_to_seq2,
+                    targ,
+                    ..
+                } => {
+                    for j in 0..n_comp_haps {
+                        let hap = haps[j];
+                        let h = hap as usize;
+                        let v = if h < n_ref {
+                            seq1_to_seq2[hap2seq[h] as usize]
+                        } else {
+                            targ[h - n_ref]
+                        };
+                        hap_out[j] = hap;
+                        match_out[j] = v == targ_allele;
+                    }
+                }
+                crate::impdata::ClusterCoding::Direct {
+                    coded_ref, targ, ..
+                } => {
+                    for j in 0..n_comp_haps {
+                        let hap = haps[j];
+                        let h = hap as usize;
+                        let v = if h < n_ref {
+                            coded_ref[h]
+                        } else {
+                            targ[h - n_ref]
+                        };
+                        hap_out[j] = hap;
+                        match_out[j] = v == targ_allele;
+                    }
+                }
             }
         }
         n_comp_haps

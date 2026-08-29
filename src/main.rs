@@ -111,12 +111,23 @@ fn run(par: &Par, log: &mut Log) {
         targ_samples.len()
     ));
 
-    let mut sliding = windows::SlidingWindows::new(par, &genmap, targ_it, ref_it);
+    let genmap = std::sync::Arc::new(genmap);
+    let sliding = windows::SlidingWindows::new(par, genmap.clone(), targ_it, ref_it);
+    let mut bg = windows::BackgroundWindows::spawn(sliding);
     let mut writer =
         impout::WindowWriter::new(&par.out, targ_samples.clone(), par.ap, par.gp);
 
+    let timing = std::env::var("RUSTY_BEAGLE_TIMING").is_ok();
     let mut window_count = 0usize;
-    while let Some(window) = sliding.next_window() {
+    loop {
+        let t_read = Instant::now();
+        let window = match bg.next_window() {
+            Some(w) => w,
+            None => break,
+        };
+        if timing {
+            eprintln!("[timing] window read: {:.3}s", t_read.elapsed().as_secs_f64());
+        }
         window_count += 1;
         let indices = &window.indices;
         let first = &window.targ_recs[0].marker;
@@ -148,12 +159,24 @@ fn run(par: &Par, log: &mut Log) {
             writer.print_phased(&window, m_start, m_end);
         } else {
             let t0 = Instant::now();
-            let imp_data = impdata::ImpData::new(par, &window, &genmap, &targ_samples);
+            let imp_data = impdata::ImpData::new(par, &window, genmap.as_ref(), &targ_samples);
+            let t1 = Instant::now();
             let ibs_haps = impibs::ImpIbs::new(&imp_data);
+            let t2 = Instant::now();
             let state_probs = hmm::state_probs(&imp_data, &ibs_haps);
+            let t3 = Instant::now();
             let m_start = indices.prev_splice;
             let m_end = indices.next_splice;
             writer.print_imputed(&imp_data, &window, m_start, m_end, &state_probs);
+            if timing {
+                eprintln!(
+                    "[timing] impdata: {:.3}s  ibs: {:.3}s  hmm: {:.3}s  output: {:.3}s",
+                    (t1 - t0).as_secs_f64(),
+                    (t2 - t1).as_secs_f64(),
+                    (t3 - t2).as_secs_f64(),
+                    t3.elapsed().as_secs_f64()
+                );
+            }
             log.println(&format!(
                 "Imputation time  : {:.2} seconds",
                 t0.elapsed().as_secs_f64()
@@ -161,9 +184,10 @@ fn run(par: &Par, log: &mut Log) {
         }
     }
     writer.close();
+    let stats = bg.finish();
     log.println(&format!(
         "\nCumulative Statistics:\nReference markers: {}\nStudy     markers: {}\nWindows:           {}",
-        sliding.cum_ref_markers, sliding.cum_targ_markers, window_count
+        stats.cum_ref_markers, stats.cum_targ_markers, window_count
     ));
 }
 

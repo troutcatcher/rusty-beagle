@@ -322,9 +322,14 @@ impl SeqCoder {
         self.seq2allele_seq_map.push(Vec::new());
     }
 
-    /// `SeqCoder3.add`; returns false when the record does not fit in the
+    /// `SeqCoder3.add`; returns the record back when it does not fit in the
     /// current block (caller must flush and retry).
-    pub fn add(&mut self, marker: Marker, major: u8, carriers: Vec<Vec<u32>>) -> bool {
+    pub fn add(
+        &mut self,
+        marker: Marker,
+        major: u8,
+        carriers: Vec<Vec<u32>>,
+    ) -> Result<(), (Marker, u8, Vec<Vec<u32>>)> {
         let success = self.set_allele_map(major, &carriers);
         if success {
             let n_alleles = carriers.len();
@@ -351,9 +356,12 @@ impl SeqCoder {
                 }
             }
             self.recs.push((marker, major, carriers));
+            debug_assert_eq!(self.seq2cnt.len(), self.seq2allele_seq_map.len());
+            Ok(())
+        } else {
+            debug_assert_eq!(self.seq2cnt.len(), self.seq2allele_seq_map.len());
+            Err((marker, major, carriers))
         }
-        debug_assert_eq!(self.seq2cnt.len(), self.seq2allele_seq_map.len());
-        success
     }
 
     fn set_allele_map(&mut self, major: u8, carriers: &[Vec<u32>]) -> bool {
@@ -558,49 +566,68 @@ impl RefReader {
     }
 
     /// Parses lines until at least one record is finalized or input ends.
+    /// Lines are parsed in parallel batches (as Java's `RefIt` does) and then
+    /// run through the sequence coder in order.
     fn fill(&mut self) {
+        use rayon::prelude::*;
+        const BATCH: usize = 512;
         while self.out.is_empty() && !self.done {
-            match self.lines.next_line() {
-                None => {
-                    self.done = true;
-                    self.flush();
+            let mut batch: Vec<String> = Vec::with_capacity(BATCH);
+            while batch.len() < BATCH {
+                match self.lines.next_line() {
+                    Some(line) => batch.push(line),
+                    None => {
+                        self.done = true;
+                        break;
+                    }
                 }
-                Some(line) => {
-                    let (marker, hap_lists) = parse_ref_rec(&self.header, &line)
-                        .unwrap_or_else(|e| {
+            }
+            let parsed: Vec<(Marker, u8, Vec<Vec<u32>>)> = batch
+                .par_iter()
+                .map(|line| {
+                    let (marker, hap_lists) =
+                        parse_ref_rec(&self.header, line).unwrap_or_else(|e| {
                             eprintln!("ERROR: {}", e);
                             std::process::exit(1)
                         });
-                    if let Some(id) = &marker.id {
-                        if self.exclude_markers.contains(id.as_ref()) {
-                            continue;
-                        }
-                    }
                     let (major, carriers) = to_allele_coded(hap_lists);
-                    let chrom = marker.chrom_idx as i32;
-                    if self.last_chrom == -1 {
-                        self.last_chrom = chrom;
-                    }
-                    if chrom != self.last_chrom {
-                        self.flush();
-                        self.last_chrom = chrom;
-                    }
-                    if !self.apply_seq_coding(&marker, major, &carriers) {
-                        self.pending.push(Some(RefRec {
-                            marker,
-                            alleles: RefAlleles::AlleleCoded { major, carriers },
-                            n_haps: self.n_haps,
-                        }));
-                    } else {
-                        let ok = self.coder.add(marker.clone(), major, carriers.clone());
-                        if !ok {
-                            self.flush();
-                            let ok2 = self.coder.add(marker, major, carriers);
-                            assert!(ok2, "SeqCoder add failed after flush");
-                        }
-                        self.pending.push(None);
+                    (marker, major, carriers)
+                })
+                .collect();
+            for (marker, major, carriers) in parsed {
+                if let Some(id) = &marker.id {
+                    if self.exclude_markers.contains(id.as_ref()) {
+                        continue;
                     }
                 }
+                let chrom = marker.chrom_idx as i32;
+                if self.last_chrom == -1 {
+                    self.last_chrom = chrom;
+                }
+                if chrom != self.last_chrom {
+                    self.flush();
+                    self.last_chrom = chrom;
+                }
+                if !self.apply_seq_coding(&marker, major, &carriers) {
+                    self.pending.push(Some(RefRec {
+                        marker,
+                        alleles: RefAlleles::AlleleCoded { major, carriers },
+                        n_haps: self.n_haps,
+                    }));
+                } else {
+                    if let Err((marker, major, carriers)) =
+                        self.coder.add(marker, major, carriers)
+                    {
+                        self.flush();
+                        self.coder
+                            .add(marker, major, carriers)
+                            .unwrap_or_else(|_| panic!("SeqCoder add failed after flush"));
+                    }
+                    self.pending.push(None);
+                }
+            }
+            if self.done {
+                self.flush();
             }
         }
     }
