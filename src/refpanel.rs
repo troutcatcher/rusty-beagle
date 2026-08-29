@@ -550,7 +550,7 @@ impl SeqCoder {
 /// high-frequency records in blocks.
 pub struct RefReader {
     pub header: VcfHeader,
-    lines: crate::vcfio::LineSource,
+    lines: crate::vcfio::PipelinedLineSource,
     coder: SeqCoder,
     max_seq_coded_alleles: usize,
     max_seq_coding_major_cnt: i64,
@@ -572,6 +572,7 @@ impl RefReader {
         lines: crate::vcfio::LineSource,
         exclude_markers: std::collections::HashSet<String>,
     ) -> RefReader {
+        let lines = lines.into_pipelined();
         let n_samples = header.samples.len();
         let n_haps = n_samples << 1;
         let coder = SeqCoder::new(n_samples);
@@ -631,12 +632,22 @@ impl RefReader {
     fn fill(&mut self) {
         use rayon::prelude::*;
         while self.out.is_empty() && !self.done {
-            if self.lines.fill_batch(crate::vcfio::LINE_BATCH) < crate::vcfio::LINE_BATCH {
+            let tr0 = std::time::Instant::now();
+            let batch = match self.lines.next_batch() {
+                Some(b) => b,
+                None => {
+                    self.done = true;
+                    self.flush();
+                    return;
+                }
+            };
+            if batch.len() < crate::vcfio::LINE_BATCH {
                 self.done = true;
             }
-            let batch = self.lines.batch();
+            let lines = batch.lines();
+            let tr1 = std::time::Instant::now();
             let header = &self.header;
-            let parsed: Vec<(Marker, u8, Vec<Vec<u32>>)> = batch
+            let parsed: Vec<(Marker, u8, Vec<Vec<u32>>)> = lines
                 .par_iter()
                 .map_init(Vec::new, |buf, line| {
                     let marker = parse_ref_rec(header, line, buf).unwrap_or_else(|e| {
@@ -648,6 +659,9 @@ impl RefReader {
                     (marker, major, carriers)
                 })
                 .collect();
+            drop(lines);
+            self.lines.recycle(batch);
+            let tr2 = std::time::Instant::now();
             for (marker, major, carriers) in parsed {
                 if let Some(id) = &marker.id {
                     if self.exclude_markers.contains(id.as_ref()) {
@@ -683,7 +697,20 @@ impl RefReader {
             if self.done {
                 self.flush();
             }
+            REF_NANOS[0].fetch_add((tr1 - tr0).as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            REF_NANOS[1].fetch_add((tr2 - tr1).as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            REF_NANOS[2].fetch_add(tr2.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+
+    /// Cumulative read/parse/seq-code nanoseconds, for RUSTY_BEAGLE_TIMING2.
+    pub fn timing_report() -> String {
+        format!(
+            "read(gunzip+split): {:.3}s  parse(par): {:.3}s  seqcode(serial): {:.3}s",
+            REF_NANOS[0].load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9,
+            REF_NANOS[1].load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9,
+            REF_NANOS[2].load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9,
+        )
     }
 
     pub fn next(&mut self) -> Option<Arc<RefRec>> {
@@ -703,3 +730,9 @@ impl RefSource for RefReader {
         self.header.samples.clone()
     }
 }
+
+static REF_NANOS: [std::sync::atomic::AtomicU64; 3] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];

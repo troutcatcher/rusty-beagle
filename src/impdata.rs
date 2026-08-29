@@ -21,13 +21,70 @@ pub enum ClusterCoding {
         seq1_to_seq2: Vec<u32>,
         targ: Vec<u32>,
         value_size: u32,
+        /// `seq1_to_seq2` transposed into one bitset per allele-sequence
+        /// index, keyed by block sequence
+        match_bits: MatchBits,
     },
     /// explicit per-ref-hap codes
     Direct {
         coded_ref: Vec<u32>,
         targ: Vec<u32>,
         value_size: u32,
+        /// `coded_ref` transposed into one bitset per allele-sequence index,
+        /// keyed by reference haplotype
+        match_bits: MatchBits,
     },
+}
+
+/// One bitset per allele-sequence index, marking which entries of a code
+/// array carry that index.
+///
+/// The HMM's per-cluster inner loop only asks "does this state carry the
+/// target's allele sequence?", so it can read a single bit instead of
+/// gathering a `u32` code.  Clusters have very few distinct sequences (~3 in
+/// practice), which makes one row far smaller than the code array — for
+/// `Direct` clusters, 1.25 KB per row against a 40 KB `coded_ref` at 10,000
+/// reference haplotypes — and so much likelier to stay in L1.
+pub struct MatchBits {
+    words: Vec<u64>,
+    stride: usize,
+    n_codes: usize,
+}
+
+impl MatchBits {
+    fn build(codes: &[u32], n_codes: usize) -> MatchBits {
+        let stride = (codes.len() + 63) >> 6;
+        let mut words = vec![0u64; n_codes * stride];
+        for (i, &c) in codes.iter().enumerate() {
+            debug_assert!((c as usize) < n_codes);
+            words[(c as usize) * stride + (i >> 6)] |= 1u64 << (i & 63);
+        }
+        MatchBits {
+            words,
+            stride,
+            n_codes,
+        }
+    }
+
+    /// The bitset for `code`, or `None` when no entry carries it.
+    #[inline]
+    pub fn row(&self, code: u32) -> Option<&[u64]> {
+        let c = code as usize;
+        if c < self.n_codes {
+            Some(&self.words[c * self.stride..(c + 1) * self.stride])
+        } else {
+            None
+        }
+    }
+}
+
+/// Tests bit `i` of a `MatchBits` row.
+#[inline]
+pub fn match_bit(row: Option<&[u64]>, i: usize) -> bool {
+    match row {
+        Some(r) => (r[i >> 6] >> (i & 63)) & 1 != 0,
+        None => false,
+    }
 }
 
 impl ClusterCoding {
@@ -403,12 +460,14 @@ fn code_cluster(
                     }
                 }
             }
+            let match_bits = MatchBits::build(&seq1_to_seq2, value_size as usize);
             ClusterCoding::Composed {
                 block: block_id,
                 hap2seq: block_hap2seq,
                 seq1_to_seq2,
                 targ: coded_targ,
                 value_size,
+                match_bits,
             }
         }
         None => {
@@ -458,10 +517,12 @@ fn code_cluster(
                     }
                 }
             }
+            let match_bits = MatchBits::build(&coded_ref, value_size as usize);
             ClusterCoding::Direct {
                 coded_ref,
                 targ: coded_targ,
                 value_size,
+                match_bits,
             }
         }
     }

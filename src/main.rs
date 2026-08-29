@@ -149,6 +149,7 @@ fn run(par: &Par, log: &mut Log) {
         };
         if timing {
             eprintln!("[timing] window read: {:.3}s", t_read.elapsed().as_secs_f64());
+            eprintln!("[timing2/ref] {}", refpanel::RefReader::timing_report());
         }
         window_count += 1;
         let indices = &window.indices;

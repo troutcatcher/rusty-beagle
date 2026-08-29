@@ -393,65 +393,21 @@ pub fn read_exclude_file(path: &Option<String>) -> HashSet<String> {
 /// per sample, so ~25 KB at 5,000 samples), which made a `String` per line
 /// costly: each allocation regrew from empty through a dozen reallocations.
 /// A shared buffer amortizes that to one append per line.
-pub struct LineSource {
-    reader: Box<dyn BufRead + Send>,
-    /// raw bytes of the current batch, newlines included
+/// A batch of VCF data lines: the raw bytes plus each line's range.
+#[derive(Default)]
+pub struct LineBatch {
     buf: Vec<u8>,
-    /// byte ranges of the batch's lines within `buf`, EOL stripped
+    /// byte ranges of the lines within `buf`, EOL stripped
     ranges: Vec<(usize, usize)>,
-    /// index of the next line to hand out from `ranges` (single-line API)
-    cursor: usize,
-    pending: Option<String>,
-    eof: bool,
 }
 
-impl LineSource {
-    pub fn new(reader: Box<dyn BufRead + Send>, first_data_line: Option<String>) -> Self {
-        LineSource {
-            reader,
-            buf: Vec::new(),
-            ranges: Vec::new(),
-            cursor: 0,
-            pending: first_data_line,
-            eof: false,
-        }
-    }
-
-    /// Reads up to `max_lines` non-blank lines into the internal buffer,
-    /// replacing any previous batch.  Returns the number of lines read;
-    /// they are then accessible via `line(i)`.
-    pub fn fill_batch(&mut self, max_lines: usize) -> usize {
-        self.buf.clear();
-        self.ranges.clear();
-        self.cursor = 0;
-        if let Some(first) = self.pending.take() {
-            self.buf.extend_from_slice(first.as_bytes());
-            self.ranges.push((0, self.buf.len()));
-        }
-        while self.ranges.len() < max_lines && !self.eof {
-            let start = self.buf.len();
-            let n = self.reader.read_until(b'\n', &mut self.buf).unwrap_or_else(|e| {
-                eprintln!("ERROR: I/O error reading VCF file: {}", e);
-                std::process::exit(1)
-            });
-            if n == 0 {
-                self.eof = true;
-                break;
-            }
-            let mut end = self.buf.len();
-            while end > start && (self.buf[end - 1] == b'\n' || self.buf[end - 1] == b'\r') {
-                end -= 1;
-            }
-            if end > start {
-                self.ranges.push((start, end));
-            } else {
-                self.buf.truncate(start); // blank line
-            }
-        }
+impl LineBatch {
+    #[inline]
+    pub fn len(&self) -> usize {
         self.ranges.len()
     }
 
-    /// The `i`-th line of the current batch.
+    /// The `i`-th line.
     #[inline]
     pub fn line(&self, i: usize) -> &str {
         let (s, e) = self.ranges[i];
@@ -461,22 +417,146 @@ impl LineSource {
         })
     }
 
-    /// The current batch as `&str` slices, for parallel parsing.
-    pub fn batch(&self) -> Vec<&str> {
+    /// All lines as `&str` slices, for parallel parsing.
+    pub fn lines(&self) -> Vec<&str> {
         (0..self.ranges.len()).map(|i| self.line(i)).collect()
+    }
+
+    fn clear(&mut self) {
+        self.buf.clear();
+        self.ranges.clear();
+    }
+}
+
+pub struct LineSource {
+    reader: Box<dyn BufRead + Send>,
+    /// batch backing the single-line API
+    batch: LineBatch,
+    /// index of the next line to hand out from `batch`
+    cursor: usize,
+    pending: Option<String>,
+    eof: bool,
+}
+
+impl LineSource {
+    pub fn new(reader: Box<dyn BufRead + Send>, first_data_line: Option<String>) -> Self {
+        LineSource {
+            reader,
+            batch: LineBatch::default(),
+            cursor: 0,
+            pending: first_data_line,
+            eof: false,
+        }
+    }
+
+    /// Reads up to `max_lines` non-blank lines into `batch`, replacing its
+    /// previous contents.  Returns the number of lines read.
+    pub fn fill_into(&mut self, batch: &mut LineBatch, max_lines: usize) -> usize {
+        batch.clear();
+        if let Some(first) = self.pending.take() {
+            batch.buf.extend_from_slice(first.as_bytes());
+            batch.ranges.push((0, batch.buf.len()));
+        }
+        while batch.ranges.len() < max_lines && !self.eof {
+            let start = batch.buf.len();
+            let n = self
+                .reader
+                .read_until(b'\n', &mut batch.buf)
+                .unwrap_or_else(|e| {
+                    eprintln!("ERROR: I/O error reading VCF file: {}", e);
+                    std::process::exit(1)
+                });
+            if n == 0 {
+                self.eof = true;
+                break;
+            }
+            let mut end = batch.buf.len();
+            while end > start && (batch.buf[end - 1] == b'\n' || batch.buf[end - 1] == b'\r') {
+                end -= 1;
+            }
+            if end > start {
+                batch.ranges.push((start, end));
+            } else {
+                batch.buf.truncate(start); // blank line
+            }
+        }
+        batch.ranges.len()
     }
 
     /// Single-line access (used for target records, which are parsed one at
     /// a time); refills the batch buffer as needed.
     pub fn next_line(&mut self) -> Option<&str> {
-        if self.cursor == self.ranges.len() {
-            if self.fill_batch(LINE_BATCH) == 0 {
+        if self.cursor == self.batch.len() {
+            let mut batch = std::mem::take(&mut self.batch);
+            let n = self.fill_into(&mut batch, LINE_BATCH);
+            self.batch = batch;
+            self.cursor = 0;
+            if n == 0 {
                 return None;
             }
         }
         let i = self.cursor;
         self.cursor += 1;
-        Some(self.line(i))
+        Some(self.batch.line(i))
+    }
+
+    /// Moves line reading onto its own thread, so decompressing and splitting
+    /// the next batch overlaps with parsing the current one.
+    pub fn into_pipelined(self) -> PipelinedLineSource {
+        PipelinedLineSource::spawn(self)
+    }
+}
+
+/// A `LineSource` driven by a background thread, handing finished batches
+/// over a bounded channel.  Buffers are returned by the consumer and reused,
+/// so steady-state reading allocates nothing.
+pub struct PipelinedLineSource {
+    /// `Option` so `drop` can disconnect the channel before joining; the
+    /// reader thread can be parked in `send`, and only a dropped receiver
+    /// wakes it
+    rx: Option<std::sync::mpsc::Receiver<LineBatch>>,
+    recycle_tx: std::sync::mpsc::SyncSender<LineBatch>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl PipelinedLineSource {
+    fn spawn(mut src: LineSource) -> PipelinedLineSource {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<LineBatch>(2);
+        let (recycle_tx, recycle_rx) = std::sync::mpsc::sync_channel::<LineBatch>(4);
+        let handle = std::thread::spawn(move || loop {
+            let mut batch = recycle_rx.try_recv().unwrap_or_default();
+            let n = src.fill_into(&mut batch, LINE_BATCH);
+            if tx.send(batch).is_err() {
+                return; // consumer dropped
+            }
+            if n < LINE_BATCH {
+                return; // end of input
+            }
+        });
+        PipelinedLineSource {
+            rx: Some(rx),
+            recycle_tx,
+            handle: Some(handle),
+        }
+    }
+
+    /// The next batch, or `None` once the input is exhausted.
+    pub fn next_batch(&mut self) -> Option<LineBatch> {
+        self.rx.as_ref()?.recv().ok()
+    }
+
+    /// Returns a consumed batch's buffers to the reader for reuse.
+    pub fn recycle(&self, batch: LineBatch) {
+        let _ = self.recycle_tx.try_send(batch);
+    }
+}
+
+impl Drop for PipelinedLineSource {
+    fn drop(&mut self) {
+        self.rx.take(); // disconnect, so a blocked send fails and the thread exits
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
     }
 }
 

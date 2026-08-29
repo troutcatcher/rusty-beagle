@@ -206,8 +206,8 @@ impl ImpStates {
                 crate::impdata::ClusterCoding::Composed {
                     block,
                     hap2seq,
-                    seq1_to_seq2,
                     targ,
+                    match_bits,
                     ..
                 } => {
                     if *block as i64 != cache_block {
@@ -228,16 +228,17 @@ impl ImpStates {
                     }
                     self.dirty.clear();
                     let cache_seq = &self.cache_seq;
+                    let row_bits = match_bits.row(targ_allele);
                     let mut w = 0u64;
                     let mut word_idx = 0;
                     for j in 0..n_comp_haps {
                         let h = haps[j] as usize;
-                        let v = if h < n_ref {
-                            seq1_to_seq2[cache_seq[j] as usize]
+                        let is_match = if h < n_ref {
+                            crate::impdata::match_bit(row_bits, cache_seq[j] as usize)
                         } else {
-                            targ[h - n_ref]
+                            targ[h - n_ref] == targ_allele
                         };
-                        if v == targ_allele {
+                        if is_match {
                             w |= 1u64 << (j & 63);
                         }
                         if j & 63 == 63 {
@@ -251,15 +252,15 @@ impl ImpStates {
                     }
                 }
                 crate::impdata::ClusterCoding::Direct {
-                    coded_ref, targ, ..
+                    targ, match_bits, ..
                 } => {
+                    let row_bits = match_bits.row(targ_allele);
                     fill_match_bits(haps, match_out, |h| {
-                        let v = if h < n_ref {
-                            coded_ref[h]
+                        if h < n_ref {
+                            crate::impdata::match_bit(row_bits, h)
                         } else {
-                            targ[h - n_ref]
-                        };
-                        v == targ_allele
+                            targ[h - n_ref] == targ_allele
+                        }
                     });
                 }
             }
