@@ -97,8 +97,8 @@ GT_PH = np.frombuffer(b"0|0\t0|1\t1|0\t1|1\t", dtype=np.uint8).reshape(4, 4)
 GT_UN = np.frombuffer(b"0/0\t0/1\t0/1\t1/1\t", dtype=np.uint8).reshape(4, 4)
 
 
-def vcf_header(chrom, chrom_len, prefix, n_samples):
-    ids = "\t".join(f"{prefix}{i}" for i in range(n_samples))
+def vcf_header(chrom, chrom_len, prefix, n_samples, offset=0):
+    ids = "\t".join(f"{prefix}{offset + i}" for i in range(n_samples))
     return ("##fileformat=VCFv4.2\n"
             f"##contig=<ID={chrom},length={chrom_len}>\n"
             '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n'
@@ -107,13 +107,13 @@ def vcf_header(chrom, chrom_len, prefix, n_samples):
 
 
 def stream_panel(path, chrom, chrom_len, pos, founders, markers, n_haps, recomb,
-                 rng, prefix, phased, level, block_haps=50_000_000):
+                 rng, prefix, phased, level, block_haps=50_000_000, offset=0):
     """Write a mosaic-of-founders VCF, generating markers in blocks so that
     peak memory stays bounded regardless of cohort size."""
     n_m = len(markers)
     B = max(1, min(n_m, block_haps // max(1, n_haps)))
     w = BgzfWriter(path, level=level)
-    w.write(vcf_header(chrom, chrom_len, prefix, n_haps // 2))
+    w.write(vcf_header(chrom, chrom_len, prefix, n_haps // 2, offset))
     table = GT_PH if phased else GT_UN
     n_f = founders.shape[0]
     who = rng.integers(0, n_f, size=n_haps, dtype=np.int16)   # carried across blocks
@@ -170,6 +170,9 @@ def main():
     ap.add_argument("--skip-map", action="store_true")
     ap.add_argument("--target-name", default="target",
                     help="basename for the target VCF(s)")
+    ap.add_argument("--batch-size", type=int, default=0,
+                    help="split the target cohort into disjoint batch files "
+                         "of this many animals (0 = one file)")
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -205,15 +208,19 @@ def main():
 
     if not args.skip_target:
         st = np.random.default_rng(args.seed + 1)
-        stream_panel(f"{args.out_dir}/{args.target_name}.vcf.gz", args.chrom,
-                     chrom_len, pos, founders, chip, 2 * args.n_targ,
-                     recomb_chip, st, "TARG", False, args.level)
-        if args.emit_phased:
-            st = np.random.default_rng(args.seed + 1)
-            stream_panel(f"{args.out_dir}/{args.target_name}_phased.vcf.gz",
-                         args.chrom, chrom_len, pos, founders, chip,
-                         2 * args.n_targ, recomb_chip, st, "TARG", True,
-                         args.level)
+        bs = args.batch_size or args.n_targ
+        n_b = -(-args.n_targ // bs)
+        for b in range(n_b):
+            k = min(bs, args.n_targ - b * bs)
+            tag = args.target_name if n_b == 1 else f"{args.target_name}_b{b:02d}"
+            stream_panel(f"{args.out_dir}/{tag}.vcf.gz", args.chrom, chrom_len,
+                         pos, founders, chip, 2 * k, recomb_chip, st, "TARG",
+                         False, args.level, offset=b * bs)
+            if args.emit_phased:
+                st2 = np.random.default_rng(args.seed + 1000 + b)
+                stream_panel(f"{args.out_dir}/{tag}_phased.vcf.gz", args.chrom,
+                             chrom_len, pos, founders, chip, 2 * k, recomb_chip,
+                             st2, "TARG", True, args.level, offset=b * bs)
 
     meta = "panel.json" if args.skip_target else f"{args.target_name}.json"
     with open(f"{args.out_dir}/{meta}", "w") as f:

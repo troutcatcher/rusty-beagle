@@ -61,6 +61,61 @@ def ensure_target(panel, n, meta, phased, nthreads):
     return path, ph_path
 
 
+
+def run_batches(args, panel, meta, ref, gmap, modes):
+    """Impute a whole cohort that is split across batch files, reporting the
+    per-batch cost and the cohort total. Each batch's output is deleted once
+    measured, so a cohort whose full output would not fit on disk still runs."""
+    import glob
+    results = args.results or os.path.join(panel, "bench_batches.tsv")
+    if not os.path.exists(results):
+        with open(results, "w") as f:
+            f.write("prog\tmode\tbatch\tn_targ\tn_ref\tn_markers\tnthreads"
+                    "\twall_s\tpeak_rss_gb\tout_gb\n")
+    for mode in modes:
+        suffix = "_phased.vcf.gz" if mode == "impute" else ".vcf.gz"
+        files = sorted(f for f in glob.glob(
+            os.path.join(panel, f"{args.batches}_b*{suffix}"))
+            if mode == "impute" or not f.endswith("_phased.vcf.gz"))
+        if not files:
+            print(f"no {mode} batch files for prefix {args.batches}")
+            continue
+        total_wall = total_out = 0.0
+        peak = 0.0
+        n_total = 0
+        print(f"=== {mode}: {len(files)} batches ===", flush=True)
+        for i, gt in enumerate(files):
+            out = os.path.join(panel, f"rusty_{mode}_b{i:02d}")
+            cmd = [args.rusty, f"gt={gt}", f"ref={ref}", f"out={out}",
+                   f"map={gmap}", f"nthreads={args.nthreads}"]
+            wall, rss, rc = run(cmd, out + ".log")
+            if rc != 0:
+                print(f"  batch {i} FAILED rc={rc}", flush=True)
+                print(open(out + ".log", errors="replace").read()[-1200:])
+                return
+            n = 0
+            with open(out + ".log", errors="replace") as f:
+                for line in f:
+                    if line.startswith("Study     samples:"):
+                        n = int(line.split(":")[1]); break
+            vcf = out + ".vcf.gz"
+            out_gb = os.path.getsize(vcf) / 1e9 if os.path.exists(vcf) else 0.0
+            total_wall += wall; total_out += out_gb
+            peak = max(peak, rss / 1e9); n_total += n
+            print(f"  batch {i:2d}: {n:5d} animals  {wall:7.1f}s  "
+                  f"peakRSS {rss/1e9:5.2f} GB  out {out_gb:.2f} GB  "
+                  f"(cum {total_wall/60:.1f} min)", flush=True)
+            with open(results, "a") as f:
+                f.write(f"rusty\t{mode}\t{i}\t{n}\t{meta['n_ref']}\t"
+                        f"{meta['n_markers']}\t{args.nthreads}\t{wall:.1f}\t"
+                        f"{rss/1e9:.2f}\t{out_gb:.2f}\n")
+            if not args.keep_output and os.path.exists(vcf):
+                os.remove(vcf)
+        print(f"COHORT {mode}: {n_total} animals in {len(files)} batches, "
+              f"{total_wall:.0f}s ({total_wall/3600:.2f} h), "
+              f"peak RSS {peak:.2f} GB, output {total_out:.1f} GB", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--panel", required=True)
@@ -77,6 +132,9 @@ def main():
     ap.add_argument("--ref", default=None, help="reference file (default ref.vcf.gz)")
     ap.add_argument("--results", default=None)
     ap.add_argument("--keep-output", action="store_true")
+    ap.add_argument("--batches",
+                    help="run every {PREFIX}_b*.vcf.gz batch file in the panel "
+                         "directory as one cohort, and report the total")
     args = ap.parse_args()
 
     panel = os.path.abspath(args.panel)
@@ -85,6 +143,9 @@ def main():
     gmap = os.path.join(panel, "plink.map")
     sizes = [int(s) for s in args.sizes.split(",")]
     modes = ["impute", "phase"] if args.mode == "both" else [args.mode]
+
+    if args.batches:
+        return run_batches(args, panel, meta, ref, gmap, modes)
 
     rows = []
     results = args.results or os.path.join(panel, "bench_results.tsv")
