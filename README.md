@@ -155,6 +155,47 @@ state probabilities, which both programs hold for every target haplotype at
 once, so it grows with the target cohort rather than with the reference
 panel.
 
+Imputation *to sequence* is the other livestock shape: a small
+whole-genome-sequenced reference and a very large cohort to impute up to it.
+The panel below is 3,500 phased reference animals at 1,000,000 variants on
+one 158 cM / 158 Mb chromosome (five default windows, ~253k reference
+markers each) with a 1/f site-frequency spectrum, and target animals
+carrying every 40th variant (25,000 chip markers) --
+`tests/gen_seq_panel.py`, measured by `tests/bench_seq_impute.py` on 4 cores:
+
+| target cohort | imputation | phasing + imputation |
+|---|---|---|
+| 100 animals | 43.4 s / 0.99 GB | 67.6 s / 1.09 GB |
+| 400 animals | 66.4 s / 2.70 GB | 154.2 s / 2.97 GB |
+| 1,600 animals | 162.7 s / 9.84 GB | 386.8 s / 10.31 GB |
+
+(wall time / peak RSS). Both are linear in the cohort: imputation costs
+35 s + 0.080 s per animal and 0.37 GB + 5.9 MB per animal, and phasing +
+imputation 58 s + 0.21 s per animal and 0.49 GB + 6.1 MB per animal. The
+fixed term is reading and sequence-coding the reference, which for this
+panel is 846 MB of BGZF (14 GB of VCF text).
+
+That per-animal memory is what decides how such a run is shaped. A
+50,000-animal cohort imputed in one pass would need ~300 GB of RAM, since
+the retained state probabilities are held for every target haplotype at
+once, and its output VCF is ~12 GB. Time is not the obstacle -- the same
+cohort is about an hour of CPU. So the cohort is split, which is what a
+production pipeline does anyway; target animals are imputed independently
+against the reference, so batches are free of each other.
+
+Splitting 50,000 animals into 25 batches of 2,000 (`--batch-size`,
+`--batches`) keeps peak RSS at 12.94 GB, inside a 16 GB machine:
+
+| full 50,000-animal cohort, in 25 batches of 2,000 | |
+|---|---|
+| imputation, total wall time | 4,443 s (1.23 h) |
+| per batch | 177.7 s mean, 12.94 GB peak RSS |
+| output | 12.3 GB BGZF |
+
+The batched total is ~10% above the ~1.12 h a single pass would take,
+because each batch re-reads the reference; a bref3 reference or a larger
+batch on a bigger machine narrows that gap.
+
 Speed comes from the same parallel structure as Java (per-haplotype HMM,
 per-sample phasing, per-cluster output, parallel input parsing) plus
 Rust-side wins: no JVM warmup/GC, parallel BGZF inflation, and zlib-rs for
@@ -211,6 +252,22 @@ java -jar /path/to/bref3.27Feb25.75f.jar /tmp/big/ref.vcf > /tmp/big/ref.bref3
 
 # .bref3 reference input (needs the separate bref3 conversion tool)
 bash tests/compare_beagle_bref3.sh /path/to/beagle.27Feb25.75f.jar /path/to/bref3.27Feb25.75f.jar /tmp/t1 nthreads=4
+```
+
+## Sequence-scale benchmark
+
+```
+# 3,500 sequenced reference animals x 1M variants on one chromosome,
+# plus a 50,000-animal cohort split into 25 batches of 2,000
+python3 tests/gen_seq_panel.py --out-dir /tmp/seq --n-ref 3500 --n-targ 50000 \
+    --n-markers 1000000 --chrom-len 158000000 --chip-every 40 \
+    --batch-size 2000 --target-name cohort --emit-phased
+
+# scaling across cohort sizes (add --jar to benchmark Java Beagle alongside)
+python3 tests/bench_seq_impute.py --panel /tmp/seq --sizes 100,400,1600
+
+# the whole cohort, batch by batch; each output is deleted once measured
+python3 tests/bench_seq_impute.py --panel /tmp/seq --sizes 0 --batches cohort
 ```
 
 ## License
