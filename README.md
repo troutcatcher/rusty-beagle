@@ -184,17 +184,27 @@ production pipeline does anyway; target animals are imputed independently
 against the reference, so batches are free of each other.
 
 Splitting 50,000 animals into 25 batches of 2,000 (`--batch-size`,
-`--batches`) keeps peak RSS at 12.94 GB, inside a 16 GB machine:
+`--batches`) keeps peak RSS just under 13 GB, inside a 16 GB machine:
 
-| full 50,000-animal cohort, in 25 batches of 2,000 | |
-|---|---|
-| imputation, total wall time | 4,443 s (1.23 h) |
-| per batch | 177.7 s mean, 12.94 GB peak RSS |
-| output | 12.3 GB BGZF |
+| full 50,000-animal cohort, in 25 batches of 2,000 | imputation | phasing + imputation |
+|---|---|---|
+| total wall time | 4,443 s (1.23 h) | 11,329 s (3.15 h) |
+| mean per batch | 177.7 s | 453.2 s |
+| peak RSS | 12.94 GB | 12.82 GB |
+| output | 12.3 GB BGZF | 12.3 GB BGZF |
 
-The batched total is ~10% above the ~1.12 h a single pass would take,
-because each batch re-reads the reference; a bref3 reference or a larger
-batch on a bigger machine narrows that gap.
+Each batched total is ~10% above what a single pass would cost (1.12 h and
+2.89 h by the fits above), because every batch re-reads the reference; a
+bref3 reference or a larger batch on a bigger machine narrows that gap.
+Peak memory is set by the batch size, not by the cohort, so the same
+50,000 animals fit on any machine once the batch is sized to its RAM.
+
+The panel is synthetic, and easier than real sequence data: its haplotypes
+are a mosaic of 200 founders, so a batch comes back with mean DR2 1.00 above
+1% MAF and 0.71 below it. Timings are not very sensitive to that -- the HMM
+does the same work whatever the answer -- but the composite-haplotype
+selection and state sparsification see less diversity than they would on a
+real panel, so treat these as a floor on the work, not a ceiling.
 
 Speed comes from the same parallel structure as Java (per-haplotype HMM,
 per-sample phasing, per-cluster output, parallel input parsing) plus
