@@ -131,6 +131,8 @@ def main():
     ap.add_argument("--only", choices=["rusty", "java"],
                     help="benchmark just one of the two programs")
     ap.add_argument("--java-xmx", default=None, help="e.g. 12g")
+    ap.add_argument("--java-opts", default=None,
+                    help="extra JVM flags, space-separated (e.g. GC logging)")
     ap.add_argument("--ref", default=None, help="reference file (default ref.vcf.gz)")
     ap.add_argument("--results", default=None)
     ap.add_argument("--keep-output", action="store_true")
@@ -174,6 +176,8 @@ def main():
                     java = ["java"]
                     if args.java_xmx:
                         java.append(f"-Xmx{args.java_xmx}")
+                    if args.java_opts:
+                        java += args.java_opts.split()
                     cmd = java + ["-jar", args.jar] + base
                 log = out + ".log"
                 print(f"[{prog}] {mode} n_targ={n} ...", flush=True)
