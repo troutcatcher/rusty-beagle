@@ -163,13 +163,32 @@ markers each) with a 1/f site-frequency spectrum, and target animals
 carrying every 40th variant (25,000 chip markers) --
 `tests/gen_seq_panel.py`, measured by `tests/bench_seq_impute.py` on 4 cores:
 
-| target cohort | imputation | phasing + imputation |
-|---|---|---|
-| 100 animals | 43.4 s / 0.99 GB | 67.6 s / 1.09 GB |
-| 400 animals | 66.4 s / 2.70 GB | 154.2 s / 2.97 GB |
-| 1,600 animals | 162.7 s / 9.84 GB | 386.8 s / 10.31 GB |
+Imputation of an already-phased target (wall time / peak RSS):
 
-(wall time / peak RSS). Both are linear in the cohort: imputation costs
+| target cohort | Java Beagle 5.5 | rusty-beagle | speedup | memory |
+|---|---|---|---|---|
+| 100 animals | 121.9 s / 5.00 GB | 43.4 s / 0.99 GB | 2.8× | 5.1× less |
+| 400 animals | 171.1 s / 7.50 GB | 66.4 s / 2.70 GB | 2.6× | 2.8× less |
+| 1,600 animals | 476.1 s / 13.28 GB | 162.7 s / 9.84 GB | 2.9× | 1.3× less |
+
+Phasing + imputation of an unphased target:
+
+| target cohort | Java Beagle 5.5 | rusty-beagle | speedup | memory |
+|---|---|---|---|---|
+| 100 animals | 143.5 s / 6.38 GB | 67.6 s / 1.09 GB | 2.1× | 5.9× less |
+| 400 animals | 278.5 s / 7.09 GB | 154.2 s / 2.97 GB | 1.8× | 2.4× less |
+| 1,600 animals | 744.8 s / 13.26 GB | 386.8 s / 10.31 GB | 1.9× | 1.3× less |
+
+The memory ratio narrows as the cohort grows because per-target-haplotype
+state comes to dominate both programs, and it is the same algorithm in both.
+The 1,600-animal Java runs were at `-Xmx12g` on a 16 GB machine and did
+reach that cap (11.3 GB live after collection), but they were not
+GC-thrashing: `-Xlog:gc` puts stop-the-world pauses at 41 s of 476 s (8.6%)
+for imputation and 50 s of 745 s (6.7%) for phasing, with no full GCs, and
+re-running at `-Xmx12800m` did not help (490 s, slightly slower). Discounting
+GC entirely would move those speedups to 2.7× and 1.8×.
+
+Both rusty-beagle curves are linear in the cohort: imputation costs
 35 s + 0.080 s per animal and 0.37 GB + 5.9 MB per animal, and phasing +
 imputation 58 s + 0.21 s per animal and 0.49 GB + 6.1 MB per animal. The
 fixed term is reading and sequence-coding the reference, which for this
@@ -182,6 +201,14 @@ once, and its output VCF is ~12 GB. Time is not the obstacle -- the same
 cohort is about an hour of CPU. So the cohort is split, which is what a
 production pipeline does anyway; target animals are imputed independently
 against the reference, so batches are free of each other.
+
+Memory decides the batch size, and that is where the gap tells: on this
+16 GB machine rusty-beagle imputes a 2,000-animal batch at 12.94 GB peak,
+while Java at `-Xmx13g` was OOM-killed partway through the first window of
+the same batch (13.95 GB anon RSS against a ~14 GB ceiling). Java has to be
+given a smaller batch here, and every extra batch re-reads the reference, so
+its aggregate cost over a fixed cohort grows faster than the per-run
+speedups above suggest.
 
 Splitting 50,000 animals into 25 batches of 2,000 (`--batch-size`,
 `--batches`) keeps peak RSS just under 13 GB, inside a 16 GB machine:
