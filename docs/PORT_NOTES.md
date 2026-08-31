@@ -6,6 +6,22 @@ Debian/Ubuntu packaging of the identical upstream release
 (`beagle_250227.orig.tar.xz`, GPL-3+), which repackages
 `https://faculty.washington.edu/browning/beagle/beagle.250227.zip`.
 
+The jars the validation and benchmark harnesses want come from that same
+packaging, which matters because the upstream site is often unreachable from
+CI and sandboxed environments while the distro mirrors are not:
+
+```
+curl -O http://archive.ubuntu.com/ubuntu/pool/universe/b/beagle/beagle_250227-2_all.deb
+dpkg-deb -x beagle_250227-2_all.deb /tmp/bgl
+# /tmp/bgl/usr/share/beagle/beagle.jar -> beagle.27Feb25.75f.jar (version 5.5)
+# /tmp/bgl/usr/share/beagle/bref3.jar  -> the matching bref3 conversion tool
+```
+
+Take the version from the pool listing rather than this exact filename; the
+Debian revision (`-2`) moves. `apt-get install beagle` gets whatever release
+the running distro pinned, which for Ubuntu noble is `220722` (Beagle 5.4) --
+a different release, so bit-parity comparisons against it are meaningless.
+
 ## Scope
 
 rusty-beagle ports the **phasing + imputation** pipeline: `ref=` (phased

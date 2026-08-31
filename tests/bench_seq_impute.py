@@ -128,6 +128,8 @@ def main():
     ap.add_argument("--rusty", default=os.path.join(
         os.path.dirname(HERE), "target", "release", "rusty-beagle"))
     ap.add_argument("--jar", help="Java Beagle jar, to benchmark alongside")
+    ap.add_argument("--only", choices=["rusty", "java"],
+                    help="benchmark just one of the two programs")
     ap.add_argument("--java-xmx", default=None, help="e.g. 12g")
     ap.add_argument("--ref", default=None, help="reference file (default ref.vcf.gz)")
     ap.add_argument("--results", default=None)
@@ -159,7 +161,10 @@ def main():
                                     args.nthreads)
         for mode in modes:
             gt = tgt_ph if mode == "impute" else tgt
-            for prog in (["rusty"] + (["java"] if args.jar else [])):
+            progs = ["rusty"] + (["java"] if args.jar else [])
+            if args.only:
+                progs = [args.only]
+            for prog in progs:
                 out = os.path.join(panel, f"{prog}_{mode}_{n}")
                 base = [f"gt={gt}", f"ref={ref}", f"out={out}",
                         f"map={gmap}", f"nthreads={args.nthreads}"]
