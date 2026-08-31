@@ -161,32 +161,58 @@ The panel below is 3,500 phased reference animals at 1,000,000 variants on
 one 158 cM / 158 Mb chromosome (five default windows, ~253k reference
 markers each) with a 1/f site-frequency spectrum, and target animals
 carrying every 40th variant (25,000 chip markers) --
-`tests/gen_seq_panel.py`, measured by `tests/bench_seq_impute.py` on 4 cores:
+`tests/gen_seq_panel.py`, measured by `tests/bench_seq_impute.py` on 4 cores
+with `nthreads=4` for both programs. Four threads is worth 3.26× over one on
+this workload (2.03× at two), with total CPU time flat across all three, so
+the parallelism is real and these are whole-machine numbers:
 
-Imputation of an already-phased target (wall time / peak RSS):
+Wall time, imputation of an already-phased target:
 
-| target cohort | Java Beagle 5.5 | rusty-beagle | speedup | memory |
-|---|---|---|---|---|
-| 100 animals | 121.9 s / 5.00 GB | 43.4 s / 0.99 GB | 2.8× | 5.1× less |
-| 400 animals | 171.1 s / 7.50 GB | 66.4 s / 2.70 GB | 2.6× | 2.8× less |
-| 1,600 animals | 476.1 s / 13.28 GB | 162.7 s / 9.84 GB | 2.9× | 1.3× less |
+| target cohort | Java Beagle 5.5 | rusty-beagle | speedup |
+|---|---|---|---|
+| 100 animals | 121.9 s | 43.4 s | 2.8× |
+| 400 animals | 171.1 s | 66.4 s | 2.6× |
+| 1,600 animals | 476.1 s | 162.7 s | 2.9× |
 
-Phasing + imputation of an unphased target:
+Wall time, phasing + imputation of an unphased target:
 
-| target cohort | Java Beagle 5.5 | rusty-beagle | speedup | memory |
-|---|---|---|---|---|
-| 100 animals | 143.5 s / 6.38 GB | 67.6 s / 1.09 GB | 2.1× | 5.9× less |
-| 400 animals | 278.5 s / 7.09 GB | 154.2 s / 2.97 GB | 1.8× | 2.4× less |
-| 1,600 animals | 744.8 s / 13.26 GB | 386.8 s / 10.31 GB | 1.9× | 1.3× less |
+| target cohort | Java Beagle 5.5 | rusty-beagle | speedup |
+|---|---|---|---|
+| 100 animals | 143.5 s | 67.6 s | 2.1× |
+| 400 animals | 278.5 s | 154.2 s | 1.8× |
+| 1,600 animals | 744.8 s | 386.8 s | 1.9× |
 
-The memory ratio narrows as the cohort grows because per-target-haplotype
-state comes to dominate both programs, and it is the same algorithm in both.
-The 1,600-animal Java runs were at `-Xmx12g` on a 16 GB machine and did
-reach that cap (11.3 GB live after collection), but they were not
+Those absolute times are one machine's; re-measured later on a slower host
+the same 400-animal run took 80.7 s rather than 66.4 s. The *ratio* is what
+carries over: re-running rusty-beagle and Java interleaved on one machine,
+with the reference already in page cache, reproduced it at 2.75× and 2.59×
+in two repeats, against the 2.58× in the table.
+
+The 1,600-animal Java runs sit against their `-Xmx12g` cap, but they are not
 GC-thrashing: `-Xlog:gc` puts stop-the-world pauses at 41 s of 476 s (8.6%)
 for imputation and 50 s of 745 s (6.7%) for phasing, with no full GCs, and
-re-running at `-Xmx12800m` did not help (490 s, slightly slower). Discounting
-GC entirely would move those speedups to 2.7× and 1.8×.
+re-running at `-Xmx12800m` was slightly slower rather than faster.
+Discounting GC entirely would move those speedups to 2.7× and 1.8×.
+
+Memory needs measuring differently for the two programs. rusty-beagle's peak
+RSS is what it actually allocates, but a JVM's RSS is mostly a function of
+the `-Xmx` it was handed -- the same 400-animal Java run peaks anywhere
+between 7.5 GB and 11.2 GB under `-Xmx12g`, while completing quite happily
+in `-Xmx3g`. So the honest comparison is rusty-beagle's peak RSS against the
+smallest heap Java finishes in, bisected per cohort (imputation):
+
+| target cohort | Java smallest working `-Xmx` | rusty-beagle peak RSS |
+|---|---|---|
+| 400 animals | 3 GB (2 GB fails) | 2.74 GB |
+| 1,000 animals | 8 GB (6 GB fails) | 6.27 GB |
+| 1,600 animals | ≤ 12 GB | 9.84 GB |
+| 2,000 animals | > 13 GB -- did not fit | 12.94 GB |
+
+That is roughly 1.2× less memory, not the 3-6× that comparing raw RSS
+figures would suggest. Both programs are the same algorithm holding the same
+retained state, so the per-animal slopes are close (5.9 MB for rusty-beagle,
+about 7.5 MB for Java); what rusty-beagle avoids is the JVM's baseline and
+the headroom G1 wants above the live set.
 
 Both rusty-beagle curves are linear in the cohort: imputation costs
 35 s + 0.080 s per animal and 0.37 GB + 5.9 MB per animal, and phasing +
@@ -202,13 +228,15 @@ cohort is about an hour of CPU. So the cohort is split, which is what a
 production pipeline does anyway; target animals are imputed independently
 against the reference, so batches are free of each other.
 
-Memory decides the batch size, and that is where the gap tells: on this
+Memory decides the batch size, and that is where the 1.2× tells. On this
 16 GB machine rusty-beagle imputes a 2,000-animal batch at 12.94 GB peak,
-while Java at `-Xmx13g` was OOM-killed partway through the first window of
-the same batch (13.95 GB anon RSS against a ~14 GB ceiling). Java has to be
-given a smaller batch here, and every extra batch re-reads the reference, so
-its aggregate cost over a fixed cohort grows faster than the per-run
-speedups above suggest.
+while Java was OOM-killed partway through the first window of the same
+batch. That is not an artifact of an over-generous `-Xmx`: extrapolating the
+bisected heap requirements above (3 GB at 400 animals, 8 GB at 1,000) puts
+Java's need at 2,000 animals near 14 GB, past what the machine has. Java has
+to take a smaller batch here, and every extra batch re-reads the reference,
+so its aggregate cost over a fixed cohort grows faster than the per-run
+speedups suggest.
 
 Splitting 50,000 animals into 25 batches of 2,000 (`--batch-size`,
 `--batches`) keeps peak RSS just under 13 GB, inside a 16 GB machine:
