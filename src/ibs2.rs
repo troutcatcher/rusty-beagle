@@ -1,3 +1,28 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// rusty-beagle - a Rust port of Beagle 5.5 genotype phasing and imputation.
+// Copyright (C) 2026 The rusty-beagle authors
+//
+// This file is part of a Rust port of Beagle 5.5 (release
+// beagle.27Feb25.75f), Copyright (C) 2014-2024 Brian L. Browning, and is
+// distributed as a modified version of that GPL-licensed work.  The module
+// documentation below names the upstream Java class(es) this file
+// corresponds to; docs/PORT_NOTES.md records the full source-to-source
+// mapping and the places where this port deviates from the Java.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 //! Port of `phase.Ibs2`, `phase.Ibs2Markers`, `phase.Ibs2Sets`,
 //! and `phase.SampleSeg`.
 

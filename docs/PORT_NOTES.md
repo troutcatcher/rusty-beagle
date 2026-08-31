@@ -180,3 +180,27 @@ separate `bref3` conversion tool, then runs both programs with
 `ref=<the bref3 file>` (not against the VCF baseline — see the bref3-specific
 notes above for why that comparison isn't meaningful). See README for
 results.
+
+## License and provenance
+
+Because this document describes a class-by-class translation, it is also the
+record of *why* rusty-beagle must be GPL-licensed: the port is a derivative
+work of Beagle 5.5, Copyright (C) 2014-2024 Brian L. Browning, which is
+distributed under the GNU General Public License, version 3 or later. Section
+5 of that license requires modified versions to be released under the same
+terms, with prominent notices that they are modified, so:
+
+- `LICENSE` holds the complete GPL v3 text (GPL section 4 requires shipping it);
+- `NOTICE` holds the copyright, the upstream attribution, the statement that
+  the whole of this work is modified relative to Beagle 5.5, and the
+  third-party crate licenses;
+- every file under `src/` and `tests/` carries an SPDX tag and the GPL notice,
+  and names the upstream class it corresponds to;
+- `rusty-beagle` prints the copyright and warranty notice at startup, writes
+  them into each run's `.log`, and prints the full notice for
+  `rusty-beagle license`.
+
+The mapping tables above satisfy the "prominent notices stating that you
+modified it" requirement in substance as well as in form: each entry states
+which upstream class a Rust module was derived from, and the behavioural notes
+state where the port's behaviour was deliberately changed.

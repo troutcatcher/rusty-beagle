@@ -1,3 +1,28 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// rusty-beagle - a Rust port of Beagle 5.5 genotype phasing and imputation.
+// Copyright (C) 2026 The rusty-beagle authors
+//
+// This file is part of a Rust port of Beagle 5.5 (release
+// beagle.27Feb25.75f), Copyright (C) 2014-2024 Brian L. Browning, and is
+// distributed as a modified version of that GPL-licensed work.  The module
+// documentation below names the upstream Java class(es) this file
+// corresponds to; docs/PORT_NOTES.md records the full source-to-source
+// mapping and the places where this port deviates from the Java.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 //! rusty-beagle: a fast Rust port of Beagle 5.5 genotype imputation.
 //!
 //! Pipeline driver (port of `main.Main` for the phased-target path).
@@ -34,11 +59,52 @@ use std::time::Instant;
 /// Printed in the `##source` header line.
 pub const JAVA_EQUIV_PROGRAM: &str = "rusty-beagle 0.1.0 (port of beagle.27Feb25.75f.jar)";
 
+/// Copyright / provenance line printed with every run.
+pub const COPYRIGHT: &str = "Copyright (C) 2026 The rusty-beagle authors\n\
+    Derived from Beagle 5.5, Copyright (C) 2014-2024 Brian L. Browning";
+
+/// Short GPL notice printed at startup (GNU GPL v3, \"How to Apply These
+/// Terms\").  `rusty-beagle license` prints the longer notice below.
+pub const WARRANTY_NOTICE: &str = "rusty-beagle comes with ABSOLUTELY NO WARRANTY; \
+    for details run `rusty-beagle license`.\n\
+    This is free software, and you are welcome to redistribute it under \
+    certain conditions;\nsee the file LICENSE for details.";
+
+/// Printed by `rusty-beagle license`.
+pub const LICENSE_NOTICE: &str = "\
+rusty-beagle is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+rusty-beagle is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+The complete text of version 3 of the GNU General Public License is in
+the file LICENSE distributed with the source of this program, and at
+<https://www.gnu.org/licenses/gpl-3.0.txt>.  The source code of this
+program, which the license entitles you to, is available from the
+distributor you obtained it from; see the NOTICE file for the
+provenance of this port and its upstream attribution.";
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
         println!("{}", JAVA_EQUIV_PROGRAM);
+        println!("{}", COPYRIGHT);
+        println!("{}\n", WARRANTY_NOTICE);
         println!("{}", par::usage());
+        return;
+    }
+    if args.len() == 1 && matches!(args[0].as_str(), "license" | "--license" | "-license") {
+        println!("{}", JAVA_EQUIV_PROGRAM);
+        println!("{}\n", COPYRIGHT);
+        println!("{}", LICENSE_NOTICE);
         return;
     }
     let par = Par::new(&args);
@@ -63,6 +129,8 @@ fn main() {
     let start = Instant::now();
     let mut log = Log::new(&par.out);
     log.println(JAVA_EQUIV_PROGRAM);
+    log.println(COPYRIGHT);
+    log.println(&format!("{}\n", WARRANTY_NOTICE));
     log.println(&format!("nthreads       : {}", par.nthreads));
     log.println(&format!("gt             : {}", par.gt));
     log.println(&format!("ref            : {}", par.reff.as_deref().unwrap()));

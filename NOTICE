@@ -1,0 +1,73 @@
+rusty-beagle
+Copyright (C) 2026 The rusty-beagle authors
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+The full text of version 3 of the GNU General Public License is in the
+file `LICENSE` in the root of this distribution, and is also available
+at <https://www.gnu.org/licenses/gpl-3.0.txt>.
+
+
+Provenance and upstream attribution
+-----------------------------------
+
+rusty-beagle is a derivative work of Beagle 5.5
+(source release `beagle.250227` / `beagle.27Feb25.75f.jar`),
+Copyright (C) 2014-2024 Brian L. Browning,
+<https://faculty.washington.edu/browning/beagle/beagle.html>,
+which is distributed under the GNU General Public License, version 3
+or (at your option) any later version.
+
+Every module of rusty-beagle is a Rust translation of the corresponding
+Java class or package of Beagle 5.5, rather than a verbatim copy: the
+algorithms, parameter defaults, file formats and numeric behaviour are
+those of the upstream program, re-expressed in Rust.  The per-file
+headers name the upstream classes each file was ported from, and
+`docs/PORT_NOTES.md` records the full source-to-source mapping,
+including the places where the Rust code deviates from the Java.
+
+In the terms of section 5(a) of the GNU General Public License, the
+whole of this work is modified relative to Beagle 5.5: it was written
+as a port during 2026 and carries prominent notices to that effect.
+
+rusty-beagle is not endorsed by, affiliated with, or supported by the
+authors of Beagle or the University of Washington.
+
+
+Third-party dependencies
+------------------------
+
+rusty-beagle links the following third-party Rust crates (the full
+dependency graph of `Cargo.lock`):
+
+  flate2, zlib-rs, rayon, rayon-core,
+  crossbeam-deque, crossbeam-epoch, crossbeam-utils, either
+
+Each declares its own license terms in its own package (MIT OR
+Apache-2.0 for all of the above except zlib-rs, which is under the Zlib
+license); all are permissive and compatible with the GNU General Public
+License version 3, so the combined work may be distributed under the
+GPL.  These crates are neither included in nor covered by this
+distribution; Cargo fetches them from <https://crates.io> and they
+remain under their own terms.  To re-verify the declared licenses of
+the exact versions pinned in `Cargo.lock`, run:
+
+  cargo metadata --format-version 1 --locked \
+    | python3 -c 'import json,sys; [print(p["name"], p["license"]) \
+        for p in json.load(sys.stdin)["packages"]]'
+
+Anyone redistributing a *binary* of rusty-beagle is distributing a work
+that also contains those crates, and must satisfy both the GPL (for
+this program: offer the corresponding source, see LICENSE section 6)
+and the crates' own attribution requirements.

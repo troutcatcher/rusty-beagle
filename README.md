@@ -165,7 +165,38 @@ bash tests/compare_beagle_bref3.sh /path/to/beagle.27Feb25.75f.jar /path/to/bref
 
 ## License
 
-GPL-3.0-or-later, the same license as Beagle. This project is a derivative
-work of Beagle 5.5, Copyright (C) 2014–2024 Brian L. Browning
-(`https://faculty.washington.edu/browning/beagle/beagle.html`). See
-`docs/PORT_NOTES.md` for the source-to-source mapping.
+rusty-beagle is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+rusty-beagle is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program. If not, see <https://www.gnu.org/licenses/>.
+
+| Where | What |
+| --- | --- |
+| `LICENSE` | the complete text of the GNU GPL, version 3 |
+| `NOTICE` | copyright, upstream attribution, third-party dependencies |
+| every source file | `SPDX-License-Identifier: GPL-3.0-or-later` and the GPL notice |
+| `rusty-beagle license` | prints the notice at run time (it is also in every run's log) |
+
+### Derivative work
+
+GPL-3.0-or-later is the same license as Beagle, and it is not optional here:
+rusty-beagle is a **derivative work** of Beagle 5.5 (release `beagle.250227` /
+`beagle.27Feb25.75f.jar`), Copyright (C) 2014–2024 Brian L. Browning
+(<https://faculty.washington.edu/browning/beagle/beagle.html>), which is itself
+distributed under the GPL. Every module here is a Rust translation of the
+corresponding Java class; `docs/PORT_NOTES.md` records the source-to-source
+mapping and the deviations, and `NOTICE` records the provenance in full.
+rusty-beagle is not endorsed by or affiliated with the authors of Beagle.
+
+If you redistribute rusty-beagle — modified or not, as source or as a compiled
+binary — the GPL requires you to keep these notices intact, to license the whole
+of your version under the GPL, and to convey the corresponding source (GPL
+sections 4–6). Adding rusty-beagle code to a proprietary program is not
+permitted by this license.
