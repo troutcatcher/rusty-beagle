@@ -206,13 +206,23 @@ smallest heap Java finishes in, bisected per cohort (imputation):
 | 400 animals | 3 GB (2 GB fails) | 2.74 GB |
 | 1,000 animals | 8 GB (6 GB fails) | 6.27 GB |
 | 1,600 animals | ≤ 12 GB | 9.84 GB |
-| 2,000 animals | > 13 GB -- did not fit | 12.94 GB |
+| 2,000 animals | ≤ 12 GB, but see below | 12.12 GB |
 
-That is roughly 1.2× less memory, not the 3-6× that comparing raw RSS
-figures would suggest. Both programs are the same algorithm holding the same
-retained state, so the per-animal slopes are close (5.9 MB for rusty-beagle,
-about 7.5 MB for Java); what rusty-beagle avoids is the JVM's baseline and
-the headroom G1 wants above the live set.
+That is roughly 1.2× less memory at the smaller cohorts, not the 3-6× that
+comparing raw RSS figures would suggest, and by 2,000 animals the two are
+level. Both programs are the same algorithm holding the same retained state,
+so the per-animal slopes are close (5.9 MB for rusty-beagle, about 7.5 MB
+for Java); what rusty-beagle avoids is the JVM's baseline and the headroom
+G1 wants above the live set.
+
+What changes near the memory ceiling is not whether Java fits but what
+fitting costs it. At 2,000 animals in `-Xmx12g` -- the largest heap this
+16 GB machine can actually back -- Java completes, but spends 941 s of its
+1,560 s in stop-the-world pauses (60%, against 8.6% at 1,600) with the heap
+pinned at the cap the whole way. rusty-beagle runs the same batch in 259 s
+at 12.12 GB. The 6.0× there is a program degrading at the edge of a machine,
+not a steady-state algorithmic gap; give Java a bigger machine and it should
+fall back toward the 2.6-2.9× the smaller cohorts show.
 
 Both rusty-beagle curves are linear in the cohort: imputation costs
 35 s + 0.080 s per animal and 0.37 GB + 5.9 MB per animal, and phasing +
@@ -228,15 +238,13 @@ cohort is about an hour of CPU. So the cohort is split, which is what a
 production pipeline does anyway; target animals are imputed independently
 against the reference, so batches are free of each other.
 
-Memory decides the batch size, and that is where the 1.2× tells. On this
-16 GB machine rusty-beagle imputes a 2,000-animal batch at 12.94 GB peak,
-while Java was OOM-killed partway through the first window of the same
-batch. That is not an artifact of an over-generous `-Xmx`: extrapolating the
-bisected heap requirements above (3 GB at 400 animals, 8 GB at 1,000) puts
-Java's need at 2,000 animals near 14 GB, past what the machine has. Java has
-to take a smaller batch here, and every extra batch re-reads the reference,
-so its aggregate cost over a fixed cohort grows faster than the per-run
-speedups suggest.
+Memory decides how big a batch is worth taking. Both programs manage a
+2,000-animal batch on this 16 GB machine, but not equally comfortably:
+rusty-beagle takes 259 s at 12.12 GB, while Java needs its whole usable heap
+and pays 60% of its 1,560 s to GC. So the batch size that is merely large
+for one program is the edge of viability for the other, and since every
+batch re-reads the reference, being able to take bigger batches compounds
+over a fixed cohort.
 
 Splitting 50,000 animals into 25 batches of 2,000 (`--batch-size`,
 `--batches`) keeps peak RSS just under 13 GB, inside a 16 GB machine:
